@@ -150,7 +150,7 @@ function App() {
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--bg-primary)' }}>
 
       {/* Sidebar */}
-      <aside style={{
+      <aside data-open={sidebarOpen ? 'true' : 'false'} style={{
         width: sidebarOpen ? '100%' : '350px',
         background: 'var(--bg-secondary)',
         borderRight: '1px solid var(--border-color)',
@@ -168,13 +168,15 @@ function App() {
           onClick={() => setSidebarOpen(!sidebarOpen)}
           style={{
             display: 'none',
-            position: 'absolute',
+            position: 'fixed',
             top: '1rem',
-            right: '1rem',
+            left: sidebarOpen ? 'auto' : '1rem',
+            right: sidebarOpen ? '1rem' : 'auto',
             background: 'var(--accent-color)',
-            padding: '0.5rem',
+            padding: '0.75rem 1rem',
             borderRadius: '8px',
-            zIndex: 1001
+            zIndex: 1001,
+            fontSize: '1.25rem'
           }}
           className="mobile-toggle"
         >
@@ -416,7 +418,7 @@ function App() {
 
         {/* Navigation Buttons for Swipe Mode */}
         {viewMode === 'swipe' && products.length > 0 && (
-          <div style={{
+          <div className="swipe-nav-buttons" style={{
             position: 'absolute',
             bottom: '2rem',
             left: '50%',
