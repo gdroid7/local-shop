@@ -1,11 +1,11 @@
 import React from 'react';
 
-const ProductCard = ({ product, onDelete }) => {
-    const { id, url, title, image, price, size, error } = product;
+const ProductCard = ({ product, onDelete, onToggleFavorite }) => {
+    const { id, url, title, image, price, size, error, is_favorite } = product;
 
     const handleClick = (e) => {
-        // Don't trigger if delete btn clicked
-        if (e.target.closest('.delete-btn')) return;
+        // Don't trigger if delete btn clicked or favorite btn clicked
+        if (e.target.closest('.delete-btn') || e.target.closest('.favorite-btn')) return;
         window.open(url, '_blank', 'noopener,noreferrer');
     };
 
@@ -13,6 +13,12 @@ const ProductCard = ({ product, onDelete }) => {
         e.stopPropagation();
         e.preventDefault();
         onDelete(id);
+    };
+
+    const handleFavoriteClick = (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        onToggleFavorite(id, !is_favorite);
     };
 
     const getDomain = (link) => {
@@ -108,10 +114,36 @@ const ProductCard = ({ product, onDelete }) => {
                         justifyContent: 'center',
                         cursor: 'pointer',
                         fontSize: '14px',
-                        padding: 0
+                        padding: 0,
+                        zIndex: 2
                     }}
                 >
                     ×
+                </button>
+                <button
+                    className="favorite-btn"
+                    onClick={handleFavoriteClick}
+                    style={{
+                        position: 'absolute',
+                        top: '8px',
+                        right: '36px',
+                        background: 'rgba(0,0,0,0.6)',
+                        color: is_favorite ? '#ef4444' : 'white',
+                        border: 'none',
+                        borderRadius: '50%',
+                        width: '24px',
+                        height: '24px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        cursor: 'pointer',
+                        fontSize: '14px',
+                        padding: 0,
+                        zIndex: 2,
+                        transition: 'color 0.2s ease'
+                    }}
+                >
+                    ♥
                 </button>
             </div>
 

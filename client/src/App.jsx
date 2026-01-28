@@ -3,6 +3,12 @@ import ProductCard from './components/ProductCard';
 import ConfirmDialog from './components/ConfirmDialog';
 
 function App() {
+  const [workspaces, setWorkspaces] = useState([]);
+  const [currentWorkspaceId, setCurrentWorkspaceId] = useState(null);
+  const [showFavorites, setShowFavorites] = useState(false);
+  const [newWorkspaceName, setNewWorkspaceName] = useState('');
+  const [isCreatingWorkspace, setIsCreatingWorkspace] = useState(false);
+
   const [urls, setUrls] = useState('');
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -16,16 +22,78 @@ function App() {
 
   // Initial load
   useEffect(() => {
-    fetchProducts();
+    fetchWorkspaces();
   }, []);
+
+  useEffect(() => {
+    if (currentWorkspaceId) {
+      fetchProducts();
+    }
+  }, [currentWorkspaceId, showFavorites]);
+
+  const fetchWorkspaces = async () => {
+    try {
+      const res = await fetch('/api/workspaces');
+      const data = await res.json();
+      setWorkspaces(data);
+      if (data.length > 0 && !currentWorkspaceId) {
+        setCurrentWorkspaceId(data[0].id);
+      }
+    } catch (e) {
+      console.error('Failed to load workspaces');
+    }
+  };
 
   const fetchProducts = async () => {
     try {
-      const res = await fetch('/api/products');
+      let url = `/api/products?workspace_id=${currentWorkspaceId}`;
+      if (showFavorites) {
+        url += '&favorites=true';
+      }
+
+      const res = await fetch(url);
       const data = await res.json();
       setProducts(data);
+      setCurrentIndex(0); // Reset swipe index
     } catch (e) {
       console.error('Failed to load products');
+    }
+  };
+
+  const createWorkspace = async () => {
+    if (!newWorkspaceName.trim()) return;
+    try {
+      const res = await fetch('/api/workspaces', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newWorkspaceName })
+      });
+      const data = await res.json();
+      setWorkspaces([...workspaces, data]);
+      setCurrentWorkspaceId(data.id);
+      setNewWorkspaceName('');
+      setIsCreatingWorkspace(false);
+    } catch (e) {
+      alert('Failed to create workspace');
+    }
+  };
+
+  const deleteWorkspace = async (id) => {
+    if (workspaces.length <= 1) {
+      alert('Cannot delete the last workspace');
+      return;
+    }
+    if (!window.confirm('Are you sure? All items in this list will be deleted.')) return;
+
+    try {
+      await fetch(`/api/workspaces/${id}`, { method: 'DELETE' });
+      const newWorkspaces = workspaces.filter(w => w.id !== id);
+      setWorkspaces(newWorkspaces);
+      if (currentWorkspaceId === id) {
+        setCurrentWorkspaceId(newWorkspaces[0].id);
+      }
+    } catch (e) {
+      alert('Failed to delete workspace');
     }
   };
 
@@ -41,7 +109,7 @@ function App() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ urls: urls }),
+        body: JSON.stringify({ urls: urls, workspace_id: currentWorkspaceId }),
       });
 
       if (!response.ok) {
@@ -77,7 +145,7 @@ function App() {
     if (!confirmDelete) return;
 
     try {
-      await fetch(`/api/products/${confirmDelete.id}`, { method: 'DELETE' });
+      await fetch(`/api/products/${confirmDelete.id}?workspace_id=${currentWorkspaceId}`, { method: 'DELETE' });
       setProducts(products.filter(p => p.id !== confirmDelete.id));
       // Adjust current index if needed
       if (currentIndex >= products.length - 1) {
@@ -87,6 +155,32 @@ function App() {
       alert('Failed to delete');
     } finally {
       setConfirmDelete(null);
+    }
+  };
+
+  const toggleFavorite = async (id, isFavorite) => {
+    try {
+      const product = products.find(p => p.id === id);
+      // Optimistic update
+      const updatedProducts = products.map(p =>
+        p.id === id ? { ...p, is_favorite: isFavorite ? 1 : 0 } : p
+      );
+
+      // If we are showing only favorites and we unfavorite, remove it from view instantly
+      if (showFavorites && !isFavorite) {
+        setProducts(updatedProducts.filter(p => p.id !== id));
+      } else {
+        setProducts(updatedProducts);
+      }
+
+      await fetch(`/api/products/${id}/favorite`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspace_id: currentWorkspaceId, is_favorite: isFavorite })
+      });
+    } catch (e) {
+      console.error('Failed to toggle favorite');
+      // Revert on error could be implemented here
     }
   };
 
@@ -203,6 +297,74 @@ function App() {
           {/* Input Section */}
           <div className="glass-panel" style={{ padding: '1.5rem', marginBottom: '1.5rem' }}>
             <div style={{ marginBottom: '1.5rem', textAlign: 'left' }}>
+              <div style={{ marginBottom: '1.5rem', paddingBottom: '1.5rem', borderBottom: '1px solid var(--border-color)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                  <h3 style={{ fontSize: '0.875rem', fontWeight: '600', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    Lists
+                  </h3>
+                  <button
+                    onClick={() => setIsCreatingWorkspace(!isCreatingWorkspace)}
+                    style={{ background: 'none', border: 'none', color: 'var(--accent-color)', cursor: 'pointer', fontSize: '1.25rem' }}
+                  >
+                    +
+                  </button>
+                </div>
+
+                {isCreatingWorkspace && (
+                  <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+                    <input
+                      type="text"
+                      value={newWorkspaceName}
+                      onChange={(e) => setNewWorkspaceName(e.target.value)}
+                      placeholder="List name..."
+                      style={{ flex: 1, padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)' }}
+                      onKeyDown={(e) => e.key === 'Enter' && createWorkspace()}
+                    />
+                    <button onClick={createWorkspace} style={{ padding: '0.5rem', background: 'var(--accent-color)', border: 'none', borderRadius: '4px', color: 'white', cursor: 'pointer' }}>
+                      Add
+                    </button>
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                  {workspaces.map(ws => (
+                    <div
+                      key={ws.id}
+                      onClick={() => { setCurrentWorkspaceId(ws.id); setSidebarOpen(false); }}
+                      style={{
+                        padding: '0.75rem',
+                        borderRadius: '8px',
+                        background: currentWorkspaceId === ws.id ? 'var(--accent-color)' : 'transparent',
+                        color: currentWorkspaceId === ws.id ? 'white' : 'var(--text-primary)',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        transition: 'all 0.2s ease'
+                      }}
+                    >
+                      <span style={{ fontWeight: currentWorkspaceId === ws.id ? '600' : '400' }}>{ws.name}</span>
+                      {workspaces.length > 1 && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); deleteWorkspace(ws.id); }}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            color: currentWorkspaceId === ws.id ? 'rgba(255,255,255,0.7)' : 'var(--text-secondary)',
+                            cursor: 'pointer',
+                            padding: '4px',
+                            display: 'flex',
+                            alignItems: 'center'
+                          }}
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
               <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem', fontWeight: '500' }}>
                 enter urls or paste text with links
               </label>
@@ -255,6 +417,28 @@ function App() {
                 <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem', fontWeight: '500' }}>
                   View Mode
                 </label>
+
+                <button
+                  onClick={() => setShowFavorites(!showFavorites)}
+                  style={{
+                    width: '100%',
+                    padding: '0.75rem',
+                    marginBottom: '1rem',
+                    background: showFavorites ? '#ef4444' : 'var(--bg-secondary)',
+                    color: showFavorites ? 'white' : 'var(--text-primary)',
+                    border: '1px solid var(--border-color)',
+                    borderRadius: '8px',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '0.5rem',
+                    fontWeight: '500'
+                  }}
+                >
+                  {showFavorites ? '♥ Showing Favorites' : '♡ Show Favorites Only'}
+                </button>
+
                 <div style={{ display: 'flex', gap: '0.5rem' }}>
                   <button
                     onClick={() => setViewMode('grid')}
@@ -392,7 +576,12 @@ function App() {
               gap: `${1.5 * cardScale}rem`,
             }}>
               {filteredProducts.map((product) => (
-                <ProductCard key={product.id || product.url} product={product} onDelete={handleDelete} />
+                <ProductCard
+                  key={product.id || product.url}
+                  product={product}
+                  onDelete={handleDelete}
+                  onToggleFavorite={toggleFavorite}
+                />
               ))}
             </section>
 
@@ -412,6 +601,7 @@ function App() {
             totalCards={products.length}
             onSwipe={handleSwipe}
             onDelete={handleDelete}
+            onToggleFavorite={toggleFavorite}
             scale={cardScale}
           />
         )}
@@ -481,7 +671,7 @@ function App() {
 }
 
 // Swipeable Cards Component
-function SwipeableCards({ cards, currentIndex, totalCards, onSwipe, onDelete, scale }) {
+function SwipeableCards({ cards, currentIndex, totalCards, onSwipe, onDelete, onToggleFavorite, scale }) {
   const [dragStart, setDragStart] = useState(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
@@ -520,8 +710,8 @@ function SwipeableCards({ cards, currentIndex, totalCards, onSwipe, onDelete, sc
 
   // Mouse events
   const handleMouseDown = (e) => {
-    // Don't start drag if clicking on delete button
-    if (e.target.closest('.delete-btn')) {
+    // Don't start drag if clicking on delete button or favorite button
+    if (e.target.closest('.delete-btn') || e.target.closest('.favorite-btn')) {
       return;
     }
     e.preventDefault();
@@ -540,8 +730,8 @@ function SwipeableCards({ cards, currentIndex, totalCards, onSwipe, onDelete, sc
 
   // Touch events
   const handleTouchStart = (e) => {
-    // Don't start drag if touching delete button
-    if (e.target.closest('.delete-btn')) {
+    // Don't start drag if touching delete button or favorite button
+    if (e.target.closest('.delete-btn') || e.target.closest('.favorite-btn')) {
       return;
     }
     const touch = e.touches[0];
@@ -632,7 +822,7 @@ function SwipeableCards({ cards, currentIndex, totalCards, onSwipe, onDelete, sc
                 userSelect: 'none'
               }}
             >
-              <ProductCard product={product} onDelete={onDelete} />
+              <ProductCard product={product} onDelete={onDelete} onToggleFavorite={onToggleFavorite} />
             </div>
           );
         })}
