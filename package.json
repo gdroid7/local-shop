@@ -9,7 +9,7 @@
         "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\" \"npm run dev:ngrok\"",
         "dev:server": "cd server && npm run dev",
         "dev:client": "cd client && npm run dev",
-        "dev:ngrok": "ngrok http 5174 --log=stdout > ngrok.log",
+        "dev:ngrok": "node scripts/start-ngrok.js",
         "start": "npm run dev",
         "build": "cd client && npm run build"
     },

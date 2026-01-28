@@ -241,7 +241,29 @@ function App() {
   const visibleCards = filteredProducts.slice(currentIndex, currentIndex + 3);
 
   return (
-    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--bg-primary)' }}>
+    <div style={{ display: 'flex', height: '100dvh', overflow: 'hidden', background: 'var(--bg-primary)' }}>
+
+      {/* Mobile toggle */}
+      <button
+        onClick={() => setSidebarOpen(!sidebarOpen)}
+        style={{
+          display: 'none', // Controlled by CSS
+          position: 'fixed',
+          top: 'max(1rem, env(safe-area-inset-top))',
+          left: sidebarOpen ? 'auto' : '1rem',
+          right: sidebarOpen ? '1rem' : 'auto',
+          background: 'var(--accent-color)',
+          padding: '0.75rem 1rem',
+          borderRadius: '8px',
+          zIndex: 1001,
+          fontSize: '1.25rem',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+          cursor: 'pointer'
+        }}
+        className="mobile-toggle"
+      >
+        {sidebarOpen ? '✕' : '☰'}
+      </button>
 
       {/* Sidebar */}
       <aside data-open={sidebarOpen ? 'true' : 'false'} style={{
@@ -253,31 +275,11 @@ function App() {
         transition: 'all 0.3s ease',
         position: sidebarOpen ? 'fixed' : 'relative',
         zIndex: 1000,
-        height: '100vh',
+        height: '100%',
         overflowY: 'auto'
       }}>
 
-        {/* Mobile toggle */}
-        <button
-          onClick={() => setSidebarOpen(!sidebarOpen)}
-          style={{
-            display: 'none',
-            position: 'fixed',
-            top: '1rem',
-            left: sidebarOpen ? 'auto' : '1rem',
-            right: sidebarOpen ? '1rem' : 'auto',
-            background: 'var(--accent-color)',
-            padding: '0.75rem 1rem',
-            borderRadius: '8px',
-            zIndex: 1001,
-            fontSize: '1.25rem'
-          }}
-          className="mobile-toggle"
-        >
-          {sidebarOpen ? '✕' : '☰'}
-        </button>
-
-        <div style={{ padding: '2rem' }}>
+        <div style={{ padding: '2rem', paddingBottom: 'calc(2rem + env(safe-area-inset-bottom))', paddingTop: 'max(2rem, calc(1rem + env(safe-area-inset-top)))' }}>
           <header style={{ marginBottom: '2rem' }}>
             <h1 style={{
               fontSize: '2rem',
@@ -565,11 +567,11 @@ function App() {
       </aside>
 
       {/* Main Content */}
-      <main style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <main style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}>
 
         {/* Grid View */}
         {viewMode === 'grid' && (
-          <div style={{ flex: 1, overflowY: 'auto', padding: '2rem' }}>
+          <div style={{ flex: 1, overflowY: 'auto', padding: '2rem', paddingBottom: 'calc(2rem + env(safe-area-inset-bottom))' }}>
             <section className="product-grid" style={{
               display: 'grid',
               gridTemplateColumns: `repeat(auto-fill, minmax(${200 * cardScale}px, 1fr))`,
@@ -610,13 +612,27 @@ function App() {
         {viewMode === 'swipe' && products.length > 0 && (
           <div className="swipe-nav-buttons" style={{
             position: 'absolute',
-            bottom: '2rem',
+            bottom: 'calc(2rem + env(safe-area-inset-bottom))',
             left: '50%',
             transform: 'translateX(-50%)',
             display: 'flex',
             gap: '1rem',
             zIndex: 10,
-            marginLeft: '175px' // Offset for sidebar
+            marginLeft: sidebarOpen ? '0' : '0', // Controlled by CSS mostly, but logic here needs simplification. CSS will handle the media query override.
+            // We'll rely on CSS class 'swipe-nav-buttons' to handle the responsive margin.
+            // On desktop, we want to center relative to the main content area (which is already offset by sidebar).
+            // Actually, main is flex:1. So left:50% of main is correct.
+            // But if sidebar is fixed (mobile), main covers whole screen.
+            // If sidebar is relative (desktop), main starts after 350px.
+            // So left: 50% is 50% of the MAIN area. That is correct in both cases.
+            // NO offset needed if we are inside MAIN. 
+            // PREVIOUS CODE had marginLeft: 175px ?? 
+            // Ah, previous code had these buttons OUTSIDE main? No, inside main.
+            // Line 660 was closing main. Yes, buttons were inside main.
+            // So left: 50% relative to Main is correct. We don't need marginLeft: 175px at all.
+            // Wait, previous code had marginLeft: '175px'. Why?
+            // Maybe because sidebar was fixed overlay on desktop too? No, relative.
+            // Let's remove the margin offset.
           }}>
             <button
               onClick={handlePrevious}
@@ -632,7 +648,9 @@ function App() {
                 alignItems: 'center',
                 justifyContent: 'center',
                 cursor: currentIndex === 0 ? 'not-allowed' : 'pointer',
-                opacity: currentIndex === 0 ? 0.3 : 1
+                opacity: currentIndex === 0 ? 0.3 : 1,
+                backdropFilter: 'blur(10px)',
+                WebkitBackdropFilter: 'blur(10px)'
               }}
             >
               ←
@@ -650,7 +668,8 @@ function App() {
                 alignItems: 'center',
                 justifyContent: 'center',
                 cursor: currentIndex >= filteredProducts.length - 1 ? 'not-allowed' : 'pointer',
-                opacity: currentIndex >= filteredProducts.length - 1 ? 0.3 : 1
+                opacity: currentIndex >= filteredProducts.length - 1 ? 0.3 : 1,
+                boxShadow: '0 4px 12px rgba(99, 102, 241, 0.4)'
               }}
             >
               →
@@ -789,8 +808,10 @@ function SwipeableCards({ cards, currentIndex, totalCards, onSwipe, onDelete, on
         position: 'relative',
         width: `${Math.min(450, 90)}%`,
         maxWidth: `${450 * scale}px`,
-        height: `${600 * scale}px`,
-        perspective: '1000px'
+        // Responsive height: Use predefined scale but cap at 75vh for mobile
+        height: `min(${600 * scale}px, 70dvh)`,
+        perspective: '1000px',
+        touchAction: 'none' // Prevent browser scrolling while swiping
       }}>
         {cards.map((product, index) => {
           const isTop = index === 0;
