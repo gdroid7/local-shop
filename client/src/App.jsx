@@ -3,6 +3,9 @@ import ProductCard from './components/ProductCard';
 import ConfirmDialog from './components/ConfirmDialog';
 
 function App() {
+  const [token, setToken] = useState(localStorage.getItem('token'));
+  const [user, setUser] = useState(null);
+
   const [workspaces, setWorkspaces] = useState([]);
   const [currentWorkspaceId, setCurrentWorkspaceId] = useState(null);
   const [showFavorites, setShowFavorites] = useState(false);
@@ -10,6 +13,39 @@ function App() {
   const [isCreatingWorkspace, setIsCreatingWorkspace] = useState(false);
 
   const [urls, setUrls] = useState('');
+
+  const logout = () => {
+    localStorage.removeItem('token');
+    setToken(null);
+    setUser(null);
+    setWorkspaces([]);
+    setProducts([]);
+  };
+
+  // Shadow global fetch to transparently add auth token
+  const fetch = async (url, options = {}) => {
+    if (!token) return window.fetch(url, options); // fallback
+    const headers = {
+      'Content-Type': 'application/json',
+      ...options.headers,
+      Authorization: token
+    };
+    const res = await window.fetch(url, { ...options, headers });
+    if (res.status === 401) {
+      logout();
+      throw new Error('Unauthorized');
+    }
+    return res;
+  };
+
+  useEffect(() => {
+    if (token && !user) {
+      window.fetch('/api/me', { headers: { Authorization: token } })
+        .then(res => { if (res.ok) return res.json(); throw new Error(); })
+        .then(setUser)
+        .catch(logout);
+    }
+  }, [token]);
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -20,10 +56,12 @@ function App() {
   const [category, setCategory] = useState('all'); // 'all', 'clothes', 'shoes'
   const [confirmDelete, setConfirmDelete] = useState(null); // Product to confirm deletion for
 
-  // Initial load
+  // Initial load and reload on auth change
   useEffect(() => {
-    fetchWorkspaces();
-  }, []);
+    if (token) {
+      fetchWorkspaces();
+    }
+  }, [token]);
 
   useEffect(() => {
     if (currentWorkspaceId) {
@@ -240,6 +278,16 @@ function App() {
   // Get visible cards (current + 2 ahead) from filtered products
   const visibleCards = filteredProducts.slice(currentIndex, currentIndex + 3);
 
+  if (!token) {
+    return <LoginPage onLogin={(t, u) => {
+      localStorage.setItem('token', t);
+      setToken(t);
+      setUser(u);
+    }} />;
+  }
+
+  // Optional: Loading state could go here, but we render optimistic UI or basic layout
+
   return (
     <div style={{ display: 'flex', height: '100dvh', overflow: 'hidden', background: 'var(--bg-primary)' }}>
 
@@ -281,19 +329,37 @@ function App() {
 
         <div style={{ padding: '2rem', paddingBottom: 'calc(2rem + env(safe-area-inset-bottom))', paddingTop: 'max(2rem, calc(1rem + env(safe-area-inset-top)))' }}>
           <header style={{ marginBottom: '2rem' }}>
-            <h1 style={{
-              fontSize: '2rem',
-              fontWeight: '800',
-              background: 'linear-gradient(to right, #fff, #a1a1aa)',
-              WebkitBackgroundClip: 'text',
-              WebkitTextFillColor: 'transparent',
-              marginBottom: '0.5rem'
-            }}>
-              GS-OmniShop
-            </h1>
-            <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-              Singapore product shortlist
-            </p>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              <div>
+                <h1 style={{
+                  fontSize: '2rem',
+                  fontWeight: '800',
+                  background: 'linear-gradient(to right, #fff, #a1a1aa)',
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  marginBottom: '0.5rem'
+                }}>
+                  GS-OmniShop
+                </h1>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+                  {user ? `Welcome, ${user.username}` : 'Singapore product shortlist'}
+                </p>
+              </div>
+              <button
+                onClick={logout}
+                style={{
+                  background: 'rgba(255,255,255,0.1)',
+                  border: '1px solid var(--border-color)',
+                  color: 'var(--text-secondary)',
+                  padding: '0.25rem 0.75rem',
+                  fontSize: '0.75rem',
+                  borderRadius: '4px',
+                  cursor: 'pointer'
+                }}
+              >
+                Logout
+              </button>
+            </div>
           </header>
 
           {/* Input Section */}
@@ -870,3 +936,99 @@ function SwipeableCards({ cards, currentIndex, totalCards, onSwipe, onDelete, on
 }
 
 export default App;
+
+function LoginPage({ onLogin }) {
+  const [isRegister, setIsRegister] = useState(false);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    const endpoint = isRegister ? '/api/register' : '/api/login';
+
+    try {
+      const res = await window.fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Request failed');
+
+      onLogin(data.token, { id: data.userId, username: data.username });
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{
+      height: '100dvh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'var(--bg-primary)',
+      color: 'var(--text-primary)'
+    }}>
+      <div className="glass-panel" style={{ padding: '2rem', width: '100%', maxWidth: '400px', background: 'var(--bg-secondary)', borderRadius: '16px', border: '1px solid var(--border-color)' }}>
+        <h2 style={{ marginBottom: '1.5rem', fontSize: '1.5rem', fontWeight: 'bold' }}>
+          {isRegister ? 'Create Account' : 'Welcome to OmniShop'}
+        </h2>
+
+        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <label style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>Username</label>
+            <input
+              type="text"
+              required
+              value={username}
+              onChange={e => setUsername(e.target.value)}
+              style={{ padding: '0.75rem', borderRadius: '8px', border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', outline: 'none' }}
+            />
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <label style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>Password</label>
+            <input
+              type="password"
+              required
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              style={{ padding: '0.75rem', borderRadius: '8px', border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', outline: 'none' }}
+            />
+          </div>
+
+          {error && <div style={{ color: '#ef4444', fontSize: '0.875rem', padding: '0.5rem', background: 'rgba(239, 68, 68, 0.1)', borderRadius: '4px' }}>{error}</div>}
+
+          <button type="submit" disabled={loading} style={{
+            padding: '0.75rem',
+            borderRadius: '8px',
+            background: 'var(--accent-color)',
+            color: 'white',
+            fontWeight: '600',
+            border: 'none',
+            cursor: 'pointer',
+            opacity: loading ? 0.7 : 1,
+            marginTop: '0.5rem'
+          }}>
+            {loading ? 'Please wait...' : (isRegister ? 'Sign Up' : 'Log In')}
+          </button>
+        </form>
+
+        <div style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid var(--border-color)', textAlign: 'center' }}>
+          <button
+            onClick={() => setIsRegister(!isRegister)}
+            style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: '0.875rem' }}
+          >
+            {isRegister ? 'Already have an account? Log In' : 'New here? Create Account'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -19,14 +19,48 @@ if (ENABLE_DB_CACHE) {
   db.pragma('foreign_keys = ON');
 
 
+  // Create users table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Create sessions table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      token TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+
   // Create workspaces table
   db.exec(`
         CREATE TABLE IF NOT EXISTS workspaces (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER DEFAULT 1,
             name TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
     `);
+
+  // Migration: Add user_id if missing
+  const cols = db.prepare('PRAGMA table_info(workspaces)').all();
+  if (!cols.find(c => c.name === 'user_id')) {
+    db.exec('ALTER TABLE workspaces ADD COLUMN user_id INTEGER DEFAULT 1');
+  }
+
+  // Ensure default admin user
+  if (!db.prepare('SELECT id FROM users WHERE id = 1').get()) {
+    const hash = crypto.createHash('sha256').update('password').digest('hex');
+    db.prepare('INSERT INTO users (id, username, password) VALUES (1, ?, ?)').run('admin', hash);
+  }
 
   // We'll use 'id' (hash) as primary key to ensure idempotency
   db.exec(`
@@ -61,6 +95,84 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
+
+const requireAuth = (req, res, next) => {
+  if (!ENABLE_DB_CACHE) return next();
+  const token = req.headers.authorization;
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const session = db.prepare('SELECT user_id FROM sessions WHERE token = ?').get(token);
+    if (!session) return res.status(401).json({ error: 'Session expired' });
+    req.user = { id: session.user_id };
+    next();
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Auth error' });
+  }
+};
+
+app.post('/api/register', (req, res) => {
+  if (!ENABLE_DB_CACHE) return res.status(501).json({ error: 'DB not enabled' });
+  try {
+    const { username, password } = req.body;
+    if (!username || !password) return res.status(400).json({ error: 'Missing fields' });
+
+    // Case insensitive storage
+    const normalizedUsername = username.toLowerCase().trim();
+
+    // Check for existing user case-insensitively
+    const existing = db.prepare('SELECT id FROM users WHERE lower(username) = ?').get(normalizedUsername);
+    if (existing) return res.status(400).json({ error: 'Username taken' });
+
+    const hash = crypto.createHash('sha256').update(password).digest('hex');
+    const result = db.prepare('INSERT INTO users (username, password) VALUES (?, ?)').run(normalizedUsername, hash);
+    const userId = result.lastInsertRowid;
+
+    db.prepare('INSERT INTO workspaces (name, user_id) VALUES (?, ?)').run('My Collection', userId);
+    const token = crypto.randomBytes(16).toString('hex');
+    db.prepare('INSERT INTO sessions (token, user_id) VALUES (?, ?)').run(token, userId);
+
+    res.json({ token, username: normalizedUsername, userId });
+  } catch (err) {
+    if (err.message.includes('UNIQUE')) return res.status(400).json({ error: 'Username taken' });
+    res.status(500).json({ error: 'Register failed' });
+  }
+});
+
+app.post('/api/login', (req, res) => {
+  if (!ENABLE_DB_CACHE) return res.status(501).json({ error: 'DB not enabled' });
+  try {
+    const { username, password } = req.body;
+    // Case insensitive lookup
+    const normalizedUsername = username.toLowerCase().trim();
+
+    const hash = crypto.createHash('sha256').update(password).digest('hex');
+
+    // Check using lower() for robustness
+    const user = db.prepare('SELECT * FROM users WHERE lower(username) = ? AND password = ?').get(normalizedUsername, hash);
+
+    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
+    const token = crypto.randomBytes(16).toString('hex');
+    db.prepare('INSERT INTO sessions (token, user_id) VALUES (?, ?)').run(token, user.id);
+
+    res.json({ token, username: user.username, userId: user.id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+app.get('/api/me', requireAuth, (req, res) => {
+  const user = db.prepare('SELECT id, username FROM users WHERE id = ?').get(req.user.id);
+  res.json(user);
+});
+
+app.post('/api/logout', requireAuth, (req, res) => {
+  const token = req.headers.authorization;
+  db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+  res.json({ success: true });
+});
 
 // Helper: MD5 Hash
 const generateHash = (text) => {
@@ -197,24 +309,29 @@ const extractSize = ($) => {
 };
 
 // GET: Fetch all cached products (with optional workspace filter and favorites filter)
-app.get('/api/products', (req, res) => {
+app.get('/api/products', requireAuth, (req, res) => {
   if (!ENABLE_DB_CACHE) return res.json([]);
   try {
     const { workspace_id, favorites } = req.query;
+    const userId = req.user.id;
 
-    let query = 'SELECT * FROM products WHERE 1=1';
-    const params = [];
+    let query = `
+      SELECT p.* FROM products p
+      JOIN workspaces w ON p.workspace_id = w.id
+      WHERE w.user_id = ?
+    `;
+    const params = [userId];
 
     if (workspace_id) {
-      query += ' AND workspace_id = ?';
+      query += ' AND p.workspace_id = ?';
       params.push(workspace_id);
     }
 
     if (favorites === 'true') {
-      query += ' AND is_favorite = 1';
+      query += ' AND p.is_favorite = 1';
     }
 
-    query += ' ORDER BY updated_at DESC';
+    query += ' ORDER BY p.updated_at DESC';
 
     const products = db.prepare(query).all(...params);
     res.json(products);
@@ -225,17 +342,22 @@ app.get('/api/products', (req, res) => {
 });
 
 // DELETE: Remove a product
-app.delete('/api/products/:id', (req, res) => {
+app.delete('/api/products/:id', requireAuth, (req, res) => {
   if (!ENABLE_DB_CACHE) return res.status(501).json({ error: 'DB not enabled' });
   try {
     const { id } = req.params;
-    const { workspace_id } = req.query;
+    const userId = req.user.id;
 
-    if (workspace_id) {
-      db.prepare('DELETE FROM products WHERE id = ? AND workspace_id = ?').run(id, workspace_id);
-    } else {
-      db.prepare('DELETE FROM products WHERE id = ?').run(id);
-    }
+    // Ensure product belongs to a workspace owned by user
+    const product = db.prepare(`
+      SELECT p.id FROM products p
+      JOIN workspaces w ON p.workspace_id = w.id
+      WHERE p.id = ? AND w.user_id = ?
+    `).get(id, userId);
+
+    if (!product) return res.status(404).json({ error: 'Product not found or access denied' });
+
+    db.prepare('DELETE FROM products WHERE id = ?').run(id);
 
     res.json({ success: true, id });
   } catch (err) {
@@ -245,10 +367,10 @@ app.delete('/api/products/:id', (req, res) => {
 });
 
 // GET: Fetch all workspaces
-app.get('/api/workspaces', (req, res) => {
+app.get('/api/workspaces', requireAuth, (req, res) => {
   if (!ENABLE_DB_CACHE) return res.json([]);
   try {
-    const workspaces = db.prepare('SELECT * FROM workspaces ORDER BY created_at ASC').all();
+    const workspaces = db.prepare('SELECT * FROM workspaces WHERE user_id = ? ORDER BY created_at ASC').all(req.user.id);
     res.json(workspaces);
   } catch (err) {
     console.error(err);
@@ -257,7 +379,7 @@ app.get('/api/workspaces', (req, res) => {
 });
 
 // POST: Create a new workspace
-app.post('/api/workspaces', (req, res) => {
+app.post('/api/workspaces', requireAuth, (req, res) => {
   if (!ENABLE_DB_CACHE) return res.status(501).json({ error: 'DB not enabled' });
   try {
     const { name } = req.body;
@@ -265,7 +387,7 @@ app.post('/api/workspaces', (req, res) => {
       return res.status(400).json({ error: 'Workspace name is required' });
     }
 
-    const result = db.prepare('INSERT INTO workspaces (name) VALUES (?)').run(name.trim());
+    const result = db.prepare('INSERT INTO workspaces (name, user_id) VALUES (?, ?)').run(name.trim(), req.user.id);
     const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(result.lastInsertRowid);
     res.json(workspace);
   } catch (err) {
@@ -275,14 +397,18 @@ app.post('/api/workspaces', (req, res) => {
 });
 
 // DELETE: Remove a workspace (and all its products)
-app.delete('/api/workspaces/:id', (req, res) => {
+app.delete('/api/workspaces/:id', requireAuth, (req, res) => {
   if (!ENABLE_DB_CACHE) return res.status(501).json({ error: 'DB not enabled' });
   try {
     const { id } = req.params;
+    const userId = req.user.id;
 
     // Prevent deletion of the last workspace
-    const count = db.prepare('SELECT COUNT(*) as count FROM workspaces').get();
-    if (count.count <= 1) {
+    const workspaces = db.prepare('SELECT id FROM workspaces WHERE user_id = ?').all(userId);
+    const workspace = workspaces.find(w => w.id == id);
+    if (!workspace) return res.status(404).json({ error: 'Workspace not found' });
+
+    if (workspaces.length <= 1) {
       return res.status(400).json({ error: 'Cannot delete the last workspace' });
     }
 
@@ -295,19 +421,24 @@ app.delete('/api/workspaces/:id', (req, res) => {
 });
 
 // PATCH: Toggle favorite status
-app.patch('/api/products/:id/favorite', (req, res) => {
+app.patch('/api/products/:id/favorite', requireAuth, (req, res) => {
   if (!ENABLE_DB_CACHE) return res.status(501).json({ error: 'DB not enabled' });
   try {
     const { id } = req.params;
-    const { workspace_id, is_favorite } = req.body;
+    const { is_favorite } = req.body;
+    const userId = req.user.id;
 
-    if (workspace_id) {
-      db.prepare('UPDATE products SET is_favorite = ? WHERE id = ? AND workspace_id = ?')
-        .run(is_favorite ? 1 : 0, id, workspace_id);
-    } else {
-      db.prepare('UPDATE products SET is_favorite = ? WHERE id = ?')
-        .run(is_favorite ? 1 : 0, id);
-    }
+    // Verify ownership
+    const product = db.prepare(`
+        SELECT p.id FROM products p
+        JOIN workspaces w ON p.workspace_id = w.id
+        WHERE p.id = ? AND w.user_id = ?
+    `).get(id, userId);
+
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+
+    db.prepare('UPDATE products SET is_favorite = ? WHERE id = ?')
+      .run(is_favorite ? 1 : 0, id);
 
     res.json({ success: true, id, is_favorite });
   } catch (err) {
@@ -316,14 +447,27 @@ app.patch('/api/products/:id/favorite', (req, res) => {
   }
 });
 
-app.post('/api/scrape', async (req, res) => {
+app.post('/api/scrape', requireAuth, async (req, res) => {
   const { urls: rawInput, workspace_id } = req.body;
   if (!rawInput) {
     return res.status(400).json({ error: 'Invalid input.' });
   }
 
-  // Default to workspace 1 if not provided
-  const workspaceId = workspace_id || 1;
+  const userId = req.user.id;
+  let targetWorkspaceId = workspace_id;
+
+  // Validate workspace
+  if (targetWorkspaceId) {
+    const ws = db.prepare('SELECT id FROM workspaces WHERE id = ? AND user_id = ?').get(targetWorkspaceId, userId);
+    if (!ws) return res.status(403).json({ error: 'Invalid workspace' });
+  } else {
+    // Default to first available
+    const ws = db.prepare('SELECT id FROM workspaces WHERE user_id = ? ORDER BY created_at ASC LIMIT 1').get(userId);
+    if (!ws) return res.status(400).json({ error: 'No workspace found' });
+    targetWorkspaceId = ws.id;
+  }
+
+  const workspaceId = targetWorkspaceId;
 
   // Handle both array of strings and single block of text
   let urls = [];
