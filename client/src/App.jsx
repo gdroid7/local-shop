@@ -7,12 +7,21 @@ function App() {
   const [user, setUser] = useState(null);
 
   const [workspaces, setWorkspaces] = useState([]);
-  const [currentWorkspaceId, setCurrentWorkspaceId] = useState(null);
+  const [currentWorkspaceId, setCurrentWorkspaceId] = useState('all');
   const [showFavorites, setShowFavorites] = useState(false);
   const [newWorkspaceName, setNewWorkspaceName] = useState('');
   const [isCreatingWorkspace, setIsCreatingWorkspace] = useState(false);
 
   const [urls, setUrls] = useState('');
+  const [products, setProducts] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [viewMode, setViewMode] = useState('grid'); // 'grid' or 'swipe'
+  const [cardScale, setCardScale] = useState(1); // 0.8 to 1.4
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [category, setCategory] = useState('all'); // 'all', 'clothes', 'shoes', 'jewellery'
+  const [confirmDelete, setConfirmDelete] = useState(null);
 
   const logout = () => {
     localStorage.removeItem('token');
@@ -22,9 +31,8 @@ function App() {
     setProducts([]);
   };
 
-  // Shadow global fetch to transparently add auth token
-  const fetch = async (url, options = {}) => {
-    if (!token) return window.fetch(url, options); // fallback
+  const fetchWithAuth = async (url, options = {}) => {
+    if (!token) return window.fetch(url, options);
     const headers = {
       'Content-Type': 'application/json',
       ...options.headers,
@@ -46,17 +54,7 @@ function App() {
         .catch(logout);
     }
   }, [token]);
-  const [products, setProducts] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [viewMode, setViewMode] = useState('grid'); // 'grid' or 'swipe'
-  const [cardScale, setCardScale] = useState(1); // 0.7 to 1.5
-  const [currentIndex, setCurrentIndex] = useState(0); // Current card index for swipe mode
-  const [sidebarOpen, setSidebarOpen] = useState(false); // Sidebar toggle for mobile
-  const [category, setCategory] = useState('all'); // 'all', 'clothes', 'shoes'
-  const [confirmDelete, setConfirmDelete] = useState(null); // Product to confirm deletion for
 
-  // Initial load and reload on auth change
   useEffect(() => {
     if (token) {
       fetchWorkspaces();
@@ -64,36 +62,42 @@ function App() {
   }, [token]);
 
   useEffect(() => {
-    if (currentWorkspaceId) {
+    if (token) {
       fetchProducts();
     }
-  }, [currentWorkspaceId, showFavorites]);
+  }, [token, currentWorkspaceId, showFavorites]);
 
   const fetchWorkspaces = async () => {
     try {
-      const res = await fetch('/api/workspaces');
+      const res = await fetchWithAuth('/api/workspaces');
       const data = await res.json();
       setWorkspaces(data);
       if (data.length > 0 && !currentWorkspaceId) {
-        setCurrentWorkspaceId(data[0].id);
+        setCurrentWorkspaceId('all');
       }
-    } catch (e) {
-      console.error('Failed to load workspaces');
+    } catch {
+      console.error('Failed to load lists');
     }
   };
 
   const fetchProducts = async () => {
     try {
-      let url = `/api/products?workspace_id=${currentWorkspaceId}`;
+      const params = new URLSearchParams();
+      if (currentWorkspaceId !== 'all') {
+        params.append('workspace_id', currentWorkspaceId);
+      }
       if (showFavorites) {
-        url += '&favorites=true';
+        params.append('favorites', 'true');
       }
 
-      const res = await fetch(url);
+      const queryString = params.toString();
+      const url = `/api/products${queryString ? `?${queryString}` : ''}`;
+
+      const res = await fetchWithAuth(url);
       const data = await res.json();
       setProducts(data);
-      setCurrentIndex(0); // Reset swipe index
-    } catch (e) {
+      setCurrentIndex(0);
+    } catch {
       console.error('Failed to load products');
     }
   };
@@ -101,7 +105,7 @@ function App() {
   const createWorkspace = async () => {
     if (!newWorkspaceName.trim()) return;
     try {
-      const res = await fetch('/api/workspaces', {
+      const res = await fetchWithAuth('/api/workspaces', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: newWorkspaceName })
@@ -111,27 +115,27 @@ function App() {
       setCurrentWorkspaceId(data.id);
       setNewWorkspaceName('');
       setIsCreatingWorkspace(false);
-    } catch (e) {
-      alert('Failed to create workspace');
+    } catch {
+      alert('Failed to create list');
     }
   };
 
   const deleteWorkspace = async (id) => {
     if (workspaces.length <= 1) {
-      alert('Cannot delete the last workspace');
+      alert('Cannot delete the last list');
       return;
     }
-    if (!window.confirm('Are you sure? All items in this list will be deleted.')) return;
+    if (!window.confirm('Delete this list and its saved products?')) return;
 
     try {
-      await fetch(`/api/workspaces/${id}`, { method: 'DELETE' });
+      await fetchWithAuth(`/api/workspaces/${id}`, { method: 'DELETE' });
       const newWorkspaces = workspaces.filter(w => w.id !== id);
       setWorkspaces(newWorkspaces);
       if (currentWorkspaceId === id) {
-        setCurrentWorkspaceId(newWorkspaces[0].id);
+        setCurrentWorkspaceId('all');
       }
-    } catch (e) {
-      alert('Failed to delete workspace');
+    } catch {
+      alert('Failed to delete list');
     }
   };
 
@@ -142,16 +146,19 @@ function App() {
     setError('');
 
     try {
-      const response = await fetch('/api/scrape', {
+      const response = await fetchWithAuth('/api/scrape', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ urls: urls, workspace_id: currentWorkspaceId }),
+        body: JSON.stringify({
+          urls: urls,
+          workspace_id: currentWorkspaceId === 'all' ? null : currentWorkspaceId
+        }),
       });
 
       if (!response.ok) {
-        throw new Error('Failed to fetch product data');
+        throw new Error('Failed to scrape product data');
       }
 
       const newProducts = await response.json();
@@ -163,10 +170,12 @@ function App() {
       });
 
       setUrls('');
-
+      if (window.innerWidth <= 860) {
+        setSidebarOpen(false);
+      }
     } catch (err) {
       console.error(err);
-      setError('Something went wrong while fetching products.');
+      setError('Could not extract product links. Make sure URLs are valid.');
     } finally {
       setLoading(false);
     }
@@ -183,14 +192,13 @@ function App() {
     if (!confirmDelete) return;
 
     try {
-      await fetch(`/api/products/${confirmDelete.id}?workspace_id=${currentWorkspaceId}`, { method: 'DELETE' });
+      await fetchWithAuth(`/api/products/${confirmDelete.id}?workspace_id=${currentWorkspaceId}`, { method: 'DELETE' });
       setProducts(products.filter(p => p.id !== confirmDelete.id));
-      // Adjust current index if needed
       if (currentIndex >= products.length - 1) {
         setCurrentIndex(Math.max(0, currentIndex - 1));
       }
-    } catch (e) {
-      alert('Failed to delete');
+    } catch {
+      alert('Failed to remove product');
     } finally {
       setConfirmDelete(null);
     }
@@ -198,27 +206,23 @@ function App() {
 
   const toggleFavorite = async (id, isFavorite) => {
     try {
-      const product = products.find(p => p.id === id);
-      // Optimistic update
       const updatedProducts = products.map(p =>
         p.id === id ? { ...p, is_favorite: isFavorite ? 1 : 0 } : p
       );
 
-      // If we are showing only favorites and we unfavorite, remove it from view instantly
       if (showFavorites && !isFavorite) {
         setProducts(updatedProducts.filter(p => p.id !== id));
       } else {
         setProducts(updatedProducts);
       }
 
-      await fetch(`/api/products/${id}/favorite`, {
+      await fetchWithAuth(`/api/products/${id}/favorite`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ workspace_id: currentWorkspaceId, is_favorite: isFavorite })
       });
-    } catch (e) {
+    } catch {
       console.error('Failed to toggle favorite');
-      // Revert on error could be implemented here
     }
   };
 
@@ -234,35 +238,34 @@ function App() {
     reader.readAsText(file);
   };
 
-  // Category detection helper
   const detectCategory = (product) => {
-    const text = `${product.title} ${product.url}`.toLowerCase();
+    const text = `${product.title || ''} ${product.url || ''}`.toLowerCase();
 
-    // Shoe keywords
     const shoeKeywords = ['shoe', 'sneaker', 'sandal', 'boot', 'heel', 'footwear', 'slipper', 'loafer'];
     if (shoeKeywords.some(keyword => text.includes(keyword))) {
       return 'shoes';
     }
 
-    // Clothing keywords
-    const clothingKeywords = ['dress', 'shirt', 'pant', 'jean', 'jacket', 'coat', 'sweater', 'hoodie', 'tshirt', 't-shirt', 'blouse', 'skirt', 'short', 'trouser'];
-    if (clothingKeywords.some(keyword => text.includes(keyword))) {
+    const apparelKeywords = ['dress', 'shirt', 'pant', 'jean', 'jacket', 'coat', 'sweater', 'hoodie', 'tshirt', 't-shirt', 'blouse', 'skirt', 'short', 'trouser'];
+    if (apparelKeywords.some(keyword => text.includes(keyword))) {
       return 'clothes';
+    }
+
+    const jewelleryKeywords = ['earring', 'necklace', 'ring', 'bracelet', 'jewel', 'pendant', 'chain', 'bangle', 'gold', 'silver', 'diamond', 'hoop', 'stud'];
+    if (jewelleryKeywords.some(keyword => text.includes(keyword))) {
+      return 'jewellery';
     }
 
     return 'other';
   };
 
-  // Filter products by category
   const filteredProducts = products.filter(product => {
     if (category === 'all') return true;
     return detectCategory(product) === category;
   });
 
-  // Navigation handlers (after filteredProducts is defined)
   const handleSwipe = (direction) => {
-    if (direction === 'left' || direction === 'right') {
-      // Move to next card
+    if (direction === 'right' || direction === 'left') {
       if (currentIndex < filteredProducts.length - 1) {
         setCurrentIndex(currentIndex + 1);
       }
@@ -275,8 +278,35 @@ function App() {
     }
   };
 
-  // Get visible cards (current + 2 ahead) from filtered products
+  // Keyboard navigation for swipe mode
+  useEffect(() => {
+    if (viewMode !== 'swipe') return;
+    const handleKeyDown = (e) => {
+      if (['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
+
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        handlePrevious();
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        handleSwipe('right');
+      } else if (e.key === ' ' || e.key === 'Spacebar') {
+        e.preventDefault();
+        const currentCard = filteredProducts[currentIndex];
+        if (currentCard?.url) {
+          window.open(currentCard.url, '_blank', 'noopener,noreferrer');
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [viewMode, currentIndex, filteredProducts]);
+
   const visibleCards = filteredProducts.slice(currentIndex, currentIndex + 3);
+  const currentProduct = filteredProducts[currentIndex];
+  const activeWorkspace = workspaces.find(w => w.id === currentWorkspaceId);
+  const currentListName = currentWorkspaceId === 'all' ? 'All Products' : (activeWorkspace?.name || 'My List');
 
   if (!token) {
     return <LoginPage onLogin={(t, u) => {
@@ -286,460 +316,674 @@ function App() {
     }} />;
   }
 
-  // Optional: Loading state could go here, but we render optimistic UI or basic layout
-
   return (
-    <div style={{ display: 'flex', height: '100dvh', overflow: 'hidden', background: 'var(--bg-primary)' }}>
+    <div style={{ display: 'flex', width: '100%', height: '100dvh', overflow: 'hidden', background: 'var(--bg-primary)' }}>
 
-      {/* Mobile toggle */}
-      <button
-        onClick={() => setSidebarOpen(!sidebarOpen)}
-        style={{
-          display: 'none', // Controlled by CSS
-          position: 'fixed',
-          top: 'max(1rem, env(safe-area-inset-top))',
-          left: sidebarOpen ? 'auto' : '1rem',
-          right: sidebarOpen ? '1rem' : 'auto',
-          background: 'var(--accent-color)',
-          padding: '0.75rem 1rem',
-          borderRadius: '8px',
-          zIndex: 1001,
-          fontSize: '1.25rem',
-          boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-          cursor: 'pointer'
-        }}
-        className="mobile-toggle"
+      {/* Backdrop overlay for mobile drawer */}
+      <div
+        className="sidebar-overlay"
+        data-open={sidebarOpen ? "true" : "false"}
+        onClick={() => setSidebarOpen(false)}
+      />
+
+      {/* Sidebar Drawer */}
+      <aside
+        className="sidebar-drawer"
+        data-open={sidebarOpen ? "true" : "false"}
       >
-        {sidebarOpen ? '✕' : '☰'}
-      </button>
+        <div style={{
+          padding: '1.25rem 1.5rem',
+          borderBottom: '1px solid var(--border-color)',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center'
+        }}>
+          <div>
+            <h1 style={{
+              fontSize: '1.4rem',
+              fontWeight: '800',
+              background: 'linear-gradient(135deg, #ffffff 0%, #a1a1aa 100%)',
+              WebkitBackgroundClip: 'text',
+              WebkitTextFillColor: 'transparent',
+              letterSpacing: '-0.02em'
+            }}>
+              ShopDeck
+            </h1>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', marginTop: '2px' }}>
+              {user?.username ? `@${user.username}` : 'Shopping Shortlist'}
+            </p>
+          </div>
 
-      {/* Sidebar */}
-      <aside data-open={sidebarOpen ? 'true' : 'false'} style={{
-        width: sidebarOpen ? '100%' : '350px',
-        background: 'var(--bg-secondary)',
-        borderRight: '1px solid var(--border-color)',
-        display: 'flex',
-        flexDirection: 'column',
-        transition: 'all 0.3s ease',
-        position: sidebarOpen ? 'fixed' : 'relative',
-        zIndex: 1000,
-        height: '100%',
-        overflowY: 'auto'
-      }}>
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+            <button
+              onClick={logout}
+              title="Sign Out"
+              style={{
+                background: 'rgba(255, 255, 255, 0.06)',
+                border: '1px solid var(--border-color)',
+                color: 'var(--text-secondary)',
+                padding: '0.35rem 0.65rem',
+                fontSize: '0.75rem',
+                borderRadius: '6px'
+              }}
+            >
+              Logout
+            </button>
+            <button
+              onClick={() => setSidebarOpen(false)}
+              className="mobile-close-btn"
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--text-secondary)',
+                fontSize: '1.25rem',
+                padding: '0.25rem 0.5rem',
+                display: 'none',
+                cursor: 'pointer'
+              }}
+            >
+              ✕
+            </button>
+          </div>
+        </div>
 
-        <div style={{ padding: '2rem', paddingBottom: 'calc(2rem + env(safe-area-inset-bottom))', paddingTop: 'max(2rem, calc(1rem + env(safe-area-inset-top)))' }}>
-          <header style={{ marginBottom: '2rem' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-              <div>
-                <h1 style={{
-                  fontSize: '2rem',
-                  fontWeight: '800',
-                  background: 'linear-gradient(to right, #fff, #a1a1aa)',
-                  WebkitBackgroundClip: 'text',
-                  WebkitTextFillColor: 'transparent',
-                  marginBottom: '0.5rem'
-                }}>
-                  GS-OmniShop
-                </h1>
-                <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-                  {user ? `Welcome, ${user.username}` : 'Singapore product shortlist'}
-                </p>
-              </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '1.25rem 1.5rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+          
+          {/* Lists / Workspaces */}
+          <div className="glass-panel" style={{ padding: '1.25rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.875rem' }}>
+              <span style={{ fontSize: '0.75rem', fontWeight: '700', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                Your Collections
+              </span>
               <button
-                onClick={logout}
+                onClick={() => setIsCreatingWorkspace(!isCreatingWorkspace)}
                 style={{
-                  background: 'rgba(255,255,255,0.1)',
-                  border: '1px solid var(--border-color)',
-                  color: 'var(--text-secondary)',
-                  padding: '0.25rem 0.75rem',
-                  fontSize: '0.75rem',
-                  borderRadius: '4px',
-                  cursor: 'pointer'
+                  background: 'var(--accent-light)',
+                  border: 'none',
+                  color: 'var(--accent-color)',
+                  width: '26px',
+                  height: '26px',
+                  borderRadius: '6px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '1rem',
+                  fontWeight: '600'
                 }}
               >
-                Logout
+                +
               </button>
             </div>
-          </header>
 
-          {/* Input Section */}
-          <div className="glass-panel" style={{ padding: '1.5rem', marginBottom: '1.5rem' }}>
-            <div style={{ marginBottom: '1.5rem', textAlign: 'left' }}>
-              <div style={{ marginBottom: '1.5rem', paddingBottom: '1.5rem', borderBottom: '1px solid var(--border-color)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-                  <h3 style={{ fontSize: '0.875rem', fontWeight: '600', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                    Lists
-                  </h3>
-                  <button
-                    onClick={() => setIsCreatingWorkspace(!isCreatingWorkspace)}
-                    style={{ background: 'none', border: 'none', color: 'var(--accent-color)', cursor: 'pointer', fontSize: '1.25rem' }}
-                  >
-                    +
-                  </button>
-                </div>
+            {isCreatingWorkspace && (
+              <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.875rem' }}>
+                <input
+                  type="text"
+                  value={newWorkspaceName}
+                  onChange={(e) => setNewWorkspaceName(e.target.value)}
+                  placeholder="New collection name..."
+                  autoFocus
+                  style={{ flex: 1, padding: '0.5rem 0.75rem', fontSize: '0.85rem' }}
+                  onKeyDown={(e) => e.key === 'Enter' && createWorkspace()}
+                />
+                <button
+                  onClick={createWorkspace}
+                  style={{
+                    padding: '0.5rem 0.875rem',
+                    background: 'var(--accent-color)',
+                    fontSize: '0.85rem',
+                    color: 'white',
+                    fontWeight: '600'
+                  }}
+                >
+                  Save
+                </button>
+              </div>
+            )}
 
-                {isCreatingWorkspace && (
-                  <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
-                    <input
-                      type="text"
-                      value={newWorkspaceName}
-                      onChange={(e) => setNewWorkspaceName(e.target.value)}
-                      placeholder="List name..."
-                      style={{ flex: 1, padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)' }}
-                      onKeyDown={(e) => e.key === 'Enter' && createWorkspace()}
-                    />
-                    <button onClick={createWorkspace} style={{ padding: '0.5rem', background: 'var(--accent-color)', border: 'none', borderRadius: '4px', color: 'white', cursor: 'pointer' }}>
-                      Add
-                    </button>
-                  </div>
-                )}
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                  {workspaces.map(ws => (
-                    <div
-                      key={ws.id}
-                      onClick={() => { setCurrentWorkspaceId(ws.id); setSidebarOpen(false); }}
-                      style={{
-                        padding: '0.75rem',
-                        borderRadius: '8px',
-                        background: currentWorkspaceId === ws.id ? 'var(--accent-color)' : 'transparent',
-                        color: currentWorkspaceId === ws.id ? 'white' : 'var(--text-primary)',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        transition: 'all 0.2s ease'
-                      }}
-                    >
-                      <span style={{ fontWeight: currentWorkspaceId === ws.id ? '600' : '400' }}>{ws.name}</span>
-                      {workspaces.length > 1 && (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); deleteWorkspace(ws.id); }}
-                          style={{
-                            background: 'none',
-                            border: 'none',
-                            color: currentWorkspaceId === ws.id ? 'rgba(255,255,255,0.7)' : 'var(--text-secondary)',
-                            cursor: 'pointer',
-                            padding: '4px',
-                            display: 'flex',
-                            alignItems: 'center'
-                          }}
-                        >
-                          ×
-                        </button>
-                      )}
-                    </div>
-                  ))}
-                </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+              <div
+                onClick={() => { setCurrentWorkspaceId('all'); setSidebarOpen(false); }}
+                style={{
+                  padding: '0.65rem 0.85rem',
+                  borderRadius: '8px',
+                  background: currentWorkspaceId === 'all' ? 'var(--accent-color)' : 'transparent',
+                  color: currentWorkspaceId === 'all' ? 'white' : 'var(--text-primary)',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  transition: 'all 0.15s ease'
+                }}
+              >
+                <span style={{ fontSize: '0.9rem', fontWeight: currentWorkspaceId === 'all' ? '600' : '400' }}>
+                  All Products
+                </span>
+                <span style={{
+                  fontSize: '0.75rem',
+                  background: currentWorkspaceId === 'all' ? 'rgba(255, 255, 255, 0.25)' : 'rgba(255, 255, 255, 0.08)',
+                  padding: '1px 7px',
+                  borderRadius: '10px'
+                }}>
+                  {products.length}
+                </span>
               </div>
 
-              <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem', fontWeight: '500' }}>
-                enter urls or paste text with links
-              </label>
-              <textarea
-                rows={4}
-                value={urls}
-                onChange={(e) => setUrls(e.target.value)}
-                placeholder="Paste WhatsApp messages or links here..."
-                style={{ marginBottom: '1rem', fontFamily: 'monospace', fontSize: '0.9rem', minHeight: '100px' }}
-              />
-
-              <div style={{ display: 'flex', gap: '0.5rem', flexDirection: 'column' }}>
-                <button onClick={handleScrape} disabled={loading} style={{ width: '100%' }}>
-                  {loading ? 'Processing...' : 'Visualize'}
-                </button>
-
-                <div style={{ position: 'relative', overflow: 'hidden' }}>
-                  <button style={{ width: '100%', backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)' }}>
-                    Upload File
-                  </button>
-                  <input
-                    type="file"
-                    accept=".txt,.csv,.json"
-                    onChange={handleFileUpload}
-                    style={{
-                      position: 'absolute',
-                      left: 0,
-                      top: 0,
-                      opacity: 0,
-                      cursor: 'pointer',
-                      height: '100%',
-                      width: '100%'
-                    }}
-                  />
+              {workspaces.map(ws => (
+                <div
+                  key={ws.id}
+                  onClick={() => { setCurrentWorkspaceId(ws.id); setSidebarOpen(false); }}
+                  style={{
+                    padding: '0.65rem 0.85rem',
+                    borderRadius: '8px',
+                    background: currentWorkspaceId === ws.id ? 'var(--accent-color)' : 'transparent',
+                    color: currentWorkspaceId === ws.id ? 'white' : 'var(--text-primary)',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    transition: 'all 0.15s ease'
+                  }}
+                >
+                  <span style={{ fontSize: '0.9rem', fontWeight: currentWorkspaceId === ws.id ? '600' : '400' }}>
+                    {ws.name}
+                  </span>
+                  {workspaces.length > 1 && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); deleteWorkspace(ws.id); }}
+                      title="Delete list"
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: currentWorkspaceId === ws.id ? 'rgba(255, 255, 255, 0.8)' : 'var(--text-muted)',
+                        cursor: 'pointer',
+                        padding: '2px 6px',
+                        fontSize: '1rem',
+                        lineHeight: '1'
+                      }}
+                    >
+                      ×
+                    </button>
+                  )}
                 </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Import / Paste Links Section */}
+          <div className="glass-panel" style={{ padding: '1.25rem' }}>
+            <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.75rem', fontWeight: '700', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              Add Product Links
+            </label>
+            <textarea
+              rows={4}
+              value={urls}
+              onChange={(e) => setUrls(e.target.value)}
+              placeholder="Paste URLs, shopping links, or WhatsApp messages..."
+              style={{ marginBottom: '0.75rem', fontSize: '0.85rem', resize: 'vertical', minHeight: '80px' }}
+            />
+
+            <div style={{ display: 'flex', gap: '0.5rem', flexDirection: 'column' }}>
+              <button
+                onClick={handleScrape}
+                disabled={loading || !urls.trim()}
+                style={{
+                  width: '100%',
+                  padding: '0.75rem',
+                  background: 'var(--accent-color)',
+                  color: 'white',
+                  fontWeight: '600',
+                  fontSize: '0.9rem'
+                }}
+              >
+                {loading ? 'Scraping Links...' : 'Scrape & Add'}
+              </button>
+
+              <div style={{ position: 'relative', width: '100%' }}>
+                <button style={{
+                  width: '100%',
+                  padding: '0.6rem',
+                  background: 'var(--bg-card)',
+                  border: '1px solid var(--border-color)',
+                  color: 'var(--text-secondary)',
+                  fontSize: '0.85rem',
+                  fontWeight: '500'
+                }}>
+                  Upload CSV / TXT
+                </button>
+                <input
+                  type="file"
+                  accept=".txt,.csv,.json"
+                  onChange={handleFileUpload}
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    opacity: 0,
+                    cursor: 'pointer',
+                    width: '100%',
+                    height: '100%'
+                  }}
+                />
               </div>
             </div>
 
             {error && (
-              <div style={{ padding: '1rem', background: 'rgba(255, 100, 100, 0.1)', color: '#f87171', borderRadius: '8px', fontSize: '0.875rem' }}>
+              <div style={{ marginTop: '0.75rem', padding: '0.65rem', background: 'var(--danger-light)', color: '#f87171', borderRadius: '8px', fontSize: '0.8rem' }}>
                 {error}
               </div>
             )}
           </div>
 
-          {/* View Controls */}
-          {products.length > 0 && (
-            <>
-              <div className="glass-panel" style={{ padding: '1rem', marginBottom: '1rem' }}>
-                <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem', fontWeight: '500' }}>
-                  View Mode
-                </label>
-
+          {/* Grid View Size Slider */}
+          {viewMode === 'grid' && (
+            <div className="glass-panel" style={{ padding: '1rem 1.25rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                <span style={{ fontSize: '0.75rem', fontWeight: '700', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                  Card Scale
+                </span>
+                <span style={{ fontSize: '0.8rem', color: 'var(--text-primary)', fontWeight: '600' }}>
+                  {Math.round(cardScale * 100)}%
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                 <button
-                  onClick={() => setShowFavorites(!showFavorites)}
-                  style={{
-                    width: '100%',
-                    padding: '0.75rem',
-                    marginBottom: '1rem',
-                    background: showFavorites ? '#ef4444' : 'var(--bg-secondary)',
-                    color: showFavorites ? 'white' : 'var(--text-primary)',
-                    border: '1px solid var(--border-color)',
-                    borderRadius: '8px',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: '0.5rem',
-                    fontWeight: '500'
-                  }}
+                  onClick={() => setCardScale(Math.max(0.75, cardScale - 0.1))}
+                  style={{ flex: 1, padding: '0.4rem', background: 'var(--bg-card)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', fontSize: '1rem' }}
                 >
-                  {showFavorites ? '♥ Showing Favorites' : '♡ Show Favorites Only'}
+                  −
                 </button>
-
-                <div style={{ display: 'flex', gap: '0.5rem' }}>
-                  <button
-                    onClick={() => setViewMode('grid')}
-                    style={{
-                      flex: 1,
-                      padding: '0.75rem',
-                      backgroundColor: viewMode === 'grid' ? 'var(--accent-color)' : 'var(--bg-secondary)',
-                      fontSize: '0.875rem'
-                    }}
-                  >
-                    Grid
-                  </button>
-                  <button
-                    onClick={() => setViewMode('swipe')}
-                    style={{
-                      flex: 1,
-                      padding: '0.75rem',
-                      backgroundColor: viewMode === 'swipe' ? 'var(--accent-color)' : 'var(--bg-secondary)',
-                      fontSize: '0.875rem'
-                    }}
-                  >
-                    Swipe
-                  </button>
-                </div>
+                <button
+                  onClick={() => setCardScale(Math.min(1.4, cardScale + 0.1))}
+                  style={{ flex: 1, padding: '0.4rem', background: 'var(--bg-card)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', fontSize: '1rem' }}
+                >
+                  +
+                </button>
               </div>
+            </div>
+          )}
 
-              <div className="glass-panel" style={{ padding: '1rem', marginBottom: '1rem' }}>
-                <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem', fontWeight: '500' }}>
-                  Category Filter
-                </label>
-                <div style={{ display: 'flex', gap: '0.5rem' }}>
-                  <button
-                    onClick={() => { setCategory('all'); setCurrentIndex(0); }}
-                    style={{
-                      flex: 1,
-                      padding: '0.75rem',
-                      backgroundColor: category === 'all' ? 'var(--accent-color)' : 'var(--bg-secondary)',
-                      fontSize: '0.875rem'
-                    }}
-                  >
-                    All
-                  </button>
-                  <button
-                    onClick={() => { setCategory('clothes'); setCurrentIndex(0); }}
-                    style={{
-                      flex: 1,
-                      padding: '0.75rem',
-                      backgroundColor: category === 'clothes' ? 'var(--accent-color)' : 'var(--bg-secondary)',
-                      fontSize: '0.875rem'
-                    }}
-                  >
-                    Clothes
-                  </button>
-                  <button
-                    onClick={() => { setCategory('shoes'); setCurrentIndex(0); }}
-                    style={{
-                      flex: 1,
-                      padding: '0.75rem',
-                      backgroundColor: category === 'shoes' ? 'var(--accent-color)' : 'var(--bg-secondary)',
-                      fontSize: '0.875rem'
-                    }}
-                  >
-                    Shoes
-                  </button>
-                </div>
+        </div>
+      </aside>
+
+      {/* Main Content Area */}
+      <main style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%', minWidth: 0, overflow: 'hidden', position: 'relative' }}>
+        
+        {/* Top Navigation Bar */}
+        <header style={{
+          height: '64px',
+          minHeight: '64px',
+          borderBottom: '1px solid var(--border-color)',
+          background: 'rgba(18, 18, 22, 0.85)',
+          backdropFilter: 'blur(12px)',
+          WebkitBackdropFilter: 'blur(12px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '0 1.25rem',
+          gap: '0.75rem',
+          zIndex: 10
+        }}>
+          {/* Left: Mobile hamburger & Active List title */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', minWidth: 0 }}>
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="mobile-menu-btn"
+              title="Open Navigation"
+              style={{
+                background: 'var(--bg-card)',
+                border: '1px solid var(--border-color)',
+                color: 'var(--text-primary)',
+                width: '38px',
+                height: '38px',
+                borderRadius: '8px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: '1.15rem'
+              }}
+            >
+              ☰
+            </button>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', minWidth: 0 }}>
+              <h2 style={{
+                fontSize: '1.1rem',
+                fontWeight: '700',
+                color: 'var(--text-primary)',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis'
+              }}>
+                {currentListName}
+              </h2>
+              <span style={{
+                fontSize: '0.75rem',
+                background: 'var(--bg-card)',
+                border: '1px solid var(--border-color)',
+                color: 'var(--text-secondary)',
+                padding: '2px 8px',
+                borderRadius: '999px',
+                whiteSpace: 'nowrap'
+              }}>
+                {filteredProducts.length}
+              </span>
+            </div>
+          </div>
+
+          {/* Center: Category Filter Pills */}
+          <div style={{
+            display: 'flex',
+            gap: '0.35rem',
+            overflowX: 'auto',
+            padding: '2px 0',
+            scrollbarWidth: 'none'
+          }}>
+            {[
+              { id: 'all', label: 'All' },
+              { id: 'clothes', label: 'Clothes' },
+              { id: 'shoes', label: 'Shoes' },
+              { id: 'jewellery', label: 'Jewellery' }
+            ].map(cat => (
+              <button
+                key={cat.id}
+                onClick={() => { setCategory(cat.id); setCurrentIndex(0); }}
+                style={{
+                  padding: '0.4rem 0.85rem',
+                  borderRadius: '999px',
+                  fontSize: '0.8rem',
+                  fontWeight: category === cat.id ? '600' : '500',
+                  background: category === cat.id ? 'var(--accent-color)' : 'var(--bg-card)',
+                  color: category === cat.id ? 'white' : 'var(--text-secondary)',
+                  border: '1px solid ' + (category === cat.id ? 'var(--accent-color)' : 'var(--border-color)'),
+                  whiteSpace: 'nowrap',
+                  cursor: 'pointer'
+                }}
+              >
+                {cat.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Right: Mode Toggle (Grid/Swipe) & Favorites */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <button
+              onClick={() => setShowFavorites(!showFavorites)}
+              title={showFavorites ? 'Show all products' : 'Show favorites only'}
+              style={{
+                padding: '0.4rem 0.75rem',
+                borderRadius: '8px',
+                fontSize: '0.8rem',
+                fontWeight: '600',
+                background: showFavorites ? 'var(--danger-color)' : 'var(--bg-card)',
+                color: showFavorites ? 'white' : 'var(--text-secondary)',
+                border: '1px solid ' + (showFavorites ? 'var(--danger-color)' : 'var(--border-color)'),
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px'
+              }}
+            >
+              ♥ <span className="hide-on-mobile">{showFavorites ? 'Favorites' : 'Favs'}</span>
+            </button>
+
+            {/* View Switcher Segments */}
+            <div style={{
+              display: 'flex',
+              background: 'var(--bg-card)',
+              border: '1px solid var(--border-color)',
+              borderRadius: '8px',
+              padding: '2px'
+            }}>
+              <button
+                onClick={() => setViewMode('grid')}
+                title="Grid View"
+                style={{
+                  padding: '0.35rem 0.65rem',
+                  borderRadius: '6px',
+                  fontSize: '0.8rem',
+                  fontWeight: '600',
+                  background: viewMode === 'grid' ? 'var(--accent-color)' : 'transparent',
+                  color: viewMode === 'grid' ? 'white' : 'var(--text-secondary)',
+                  border: 'none'
+                }}
+              >
+                ⊞ <span className="hide-on-mobile">Grid</span>
+              </button>
+              <button
+                onClick={() => setViewMode('swipe')}
+                title="Swipe View"
+                style={{
+                  padding: '0.35rem 0.65rem',
+                  borderRadius: '6px',
+                  fontSize: '0.8rem',
+                  fontWeight: '600',
+                  background: viewMode === 'swipe' ? 'var(--accent-color)' : 'transparent',
+                  color: viewMode === 'swipe' ? 'white' : 'var(--text-secondary)',
+                  border: 'none'
+                }}
+              >
+                🎴 <span className="hide-on-mobile">Swipe</span>
+              </button>
+            </div>
+          </div>
+        </header>
+
+        {/* Content Body */}
+        {viewMode === 'grid' ? (
+          <div style={{ flex: 1, overflowY: 'auto', padding: '1.5rem', width: '100%' }}>
+            {filteredProducts.length > 0 ? (
+              <section
+                className="product-grid"
+                style={{
+                  gridTemplateColumns: `repeat(auto-fill, minmax(${Math.round(200 * cardScale)}px, 1fr))`
+                }}
+              >
+                {filteredProducts.map((product) => (
+                  <ProductCard
+                    key={product.id || product.url}
+                    product={product}
+                    onDelete={handleDelete}
+                    onToggleFavorite={toggleFavorite}
+                  />
+                ))}
+              </section>
+            ) : (
+              <div style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                height: '70%',
+                color: 'var(--text-muted)',
+                textAlign: 'center',
+                padding: '2rem'
+              }}>
+                <span style={{ fontSize: '3rem', marginBottom: '1rem' }}>🛍️</span>
+                <h3 style={{ fontSize: '1.25rem', color: 'var(--text-primary)', marginBottom: '0.5rem' }}>
+                  {products.length === 0 ? 'No products in this collection' : 'No items match this filter'}
+                </h3>
+                <p style={{ maxWidth: '360px', fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+                  {products.length === 0
+                    ? 'Paste shopping links from Amazon, Flipkart, Myntra, Ajio, or any store into the sidebar.'
+                    : 'Try selecting "All" categories or disabling the favorites filter.'}
+                </p>
               </div>
+            )}
+          </div>
+        ) : (
+          /* Swipe Deck Mode */
+          <div style={{
+            flex: 1,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '1rem',
+            overflow: 'hidden',
+            position: 'relative'
+          }}>
+            {/* Card Stack Area */}
+            <div style={{ flex: 1, width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 0 }}>
+              <SwipeableCards
+                cards={visibleCards}
+                currentIndex={currentIndex}
+                totalCards={filteredProducts.length}
+                onSwipe={handleSwipe}
+                onDelete={handleDelete}
+                onToggleFavorite={toggleFavorite}
+                scale={cardScale}
+              />
+            </div>
 
-              <div className="glass-panel" style={{ padding: '1rem' }}>
-                <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem', fontWeight: '500' }}>
-                  Card Size
-                </label>
-                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                  <button
-                    onClick={() => setCardScale(Math.max(0.7, cardScale - 0.1))}
-                    style={{
-                      padding: '0.75rem',
-                      backgroundColor: 'var(--bg-secondary)',
-                      fontSize: '1rem',
-                      flex: 1
-                    }}
-                  >
-                    −
-                  </button>
-                  <span style={{ fontSize: '0.875rem', minWidth: '3rem', textAlign: 'center', fontWeight: '500' }}>
-                    {Math.round(cardScale * 100)}%
+            {/* Progress and Tactile Control Dock */}
+            {filteredProducts.length > 0 && (
+              <div style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: '0.75rem',
+                width: '100%',
+                maxWidth: '420px',
+                paddingBottom: '0.5rem',
+                zIndex: 10
+              }}>
+                {/* Progress bar */}
+                <div style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', minWidth: '85px', textAlign: 'left' }}>
+                    {currentIndex + 1} of {filteredProducts.length}
                   </span>
-                  <button
-                    onClick={() => setCardScale(Math.min(1.5, cardScale + 0.1))}
-                    style={{
-                      padding: '0.75rem',
-                      backgroundColor: 'var(--bg-secondary)',
-                      fontSize: '1rem',
-                      flex: 1
-                    }}
-                  >
-                    +
-                  </button>
-                </div>
-              </div>
-
-              {viewMode === 'swipe' && (
-                <div style={{ marginTop: '1rem', padding: '1rem', textAlign: 'center' }}>
-                  <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>
-                    Card {currentIndex + 1} of {filteredProducts.length}
-                  </div>
-                  <div style={{
-                    height: '4px',
-                    background: 'var(--bg-secondary)',
-                    borderRadius: '2px',
-                    overflow: 'hidden'
-                  }}>
+                  <div style={{ flex: 1, height: '4px', background: 'var(--bg-card)', borderRadius: '2px', overflow: 'hidden' }}>
                     <div style={{
                       height: '100%',
                       width: `${((currentIndex + 1) / filteredProducts.length) * 100}%`,
                       background: 'var(--accent-color)',
-                      transition: 'width 0.3s ease'
+                      transition: 'width 0.25s ease'
                     }} />
                   </div>
                 </div>
-              )}
-            </>
-          )}
-        </div>
-      </aside>
 
-      {/* Main Content */}
-      <main style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}>
+                {/* Tactile Control Buttons Dock */}
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '1rem',
+                  background: 'rgba(24, 24, 30, 0.85)',
+                  backdropFilter: 'blur(16px)',
+                  WebkitBackdropFilter: 'blur(16px)',
+                  padding: '0.6rem 1.25rem',
+                  borderRadius: '999px',
+                  border: '1px solid var(--glass-border)',
+                  boxShadow: 'var(--card-shadow)'
+                }}>
+                  {/* Previous / Rewind */}
+                  <button
+                    onClick={handlePrevious}
+                    disabled={currentIndex === 0}
+                    title="Previous (Left Arrow)"
+                    style={{
+                      width: '46px',
+                      height: '46px',
+                      borderRadius: '50%',
+                      background: 'var(--bg-secondary)',
+                      border: '1px solid var(--border-color)',
+                      color: 'var(--text-primary)',
+                      fontSize: '1.25rem',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: currentIndex === 0 ? 'not-allowed' : 'pointer'
+                    }}
+                  >
+                    ←
+                  </button>
 
-        {/* Grid View */}
-        {viewMode === 'grid' && (
-          <div style={{ flex: 1, overflowY: 'auto', padding: '2rem', paddingBottom: 'calc(2rem + env(safe-area-inset-bottom))' }}>
-            <section className="product-grid" style={{
-              display: 'grid',
-              gridTemplateColumns: `repeat(auto-fill, minmax(${200 * cardScale}px, 1fr))`,
-              gap: `${1.5 * cardScale}rem`,
-            }}>
-              {filteredProducts.map((product) => (
-                <ProductCard
-                  key={product.id || product.url}
-                  product={product}
-                  onDelete={handleDelete}
-                  onToggleFavorite={toggleFavorite}
-                />
-              ))}
-            </section>
+                  {/* Delete / Pass */}
+                  <button
+                    onClick={() => currentProduct && handleDelete(currentProduct.id)}
+                    title="Remove from list"
+                    style={{
+                      width: '46px',
+                      height: '46px',
+                      borderRadius: '50%',
+                      background: 'var(--bg-secondary)',
+                      border: '1px solid var(--border-color)',
+                      color: 'var(--danger-color)',
+                      fontSize: '1.25rem',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    ×
+                  </button>
 
-            {!loading && products.length === 0 && !error && (
-              <div style={{ marginTop: '4rem', color: 'var(--text-secondary)', opacity: 0.5, textAlign: 'center' }}>
-                <p>Your collection is empty.</p>
+                  {/* Favorite Toggle */}
+                  <button
+                    onClick={() => currentProduct && toggleFavorite(currentProduct.id, !currentProduct.is_favorite)}
+                    title={currentProduct?.is_favorite ? "Unfavorite" : "Favorite"}
+                    style={{
+                      width: '56px',
+                      height: '56px',
+                      borderRadius: '50%',
+                      background: currentProduct?.is_favorite ? 'var(--danger-color)' : 'var(--accent-color)',
+                      color: 'white',
+                      fontSize: '1.5rem',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: 'pointer',
+                      boxShadow: currentProduct?.is_favorite ? '0 0 16px rgba(239, 68, 68, 0.5)' : '0 0 16px rgba(99, 102, 241, 0.4)'
+                    }}
+                  >
+                    ♥
+                  </button>
+
+                  {/* Direct Store Link */}
+                  <button
+                    onClick={() => currentProduct?.url && window.open(currentProduct.url, '_blank')}
+                    title="Visit Store (Space)"
+                    style={{
+                      width: '46px',
+                      height: '46px',
+                      borderRadius: '50%',
+                      background: 'var(--bg-secondary)',
+                      border: '1px solid var(--border-color)',
+                      color: 'var(--text-primary)',
+                      fontSize: '1.15rem',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    ↗
+                  </button>
+
+                  {/* Next / Advance */}
+                  <button
+                    onClick={() => handleSwipe('right')}
+                    disabled={currentIndex >= filteredProducts.length - 1}
+                    title="Next (Right Arrow)"
+                    style={{
+                      width: '46px',
+                      height: '46px',
+                      borderRadius: '50%',
+                      background: 'var(--bg-secondary)',
+                      border: '1px solid var(--border-color)',
+                      color: 'var(--text-primary)',
+                      fontSize: '1.25rem',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: currentIndex >= filteredProducts.length - 1 ? 'not-allowed' : 'pointer'
+                    }}
+                  >
+                    →
+                  </button>
+                </div>
               </div>
             )}
-          </div>
-        )}
-
-        {/* Swipe View */}
-        {viewMode === 'swipe' && (
-          <SwipeableCards
-            cards={visibleCards}
-            currentIndex={currentIndex}
-            totalCards={products.length}
-            onSwipe={handleSwipe}
-            onDelete={handleDelete}
-            onToggleFavorite={toggleFavorite}
-            scale={cardScale}
-          />
-        )}
-
-        {/* Navigation Buttons for Swipe Mode */}
-        {viewMode === 'swipe' && products.length > 0 && (
-          <div className="swipe-nav-buttons" style={{
-            position: 'absolute',
-            bottom: 'calc(2rem + env(safe-area-inset-bottom))',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            display: 'flex',
-            gap: '1rem',
-            zIndex: 10,
-            marginLeft: sidebarOpen ? '0' : '0', // Controlled by CSS mostly, but logic here needs simplification. CSS will handle the media query override.
-            // We'll rely on CSS class 'swipe-nav-buttons' to handle the responsive margin.
-            // On desktop, we want to center relative to the main content area (which is already offset by sidebar).
-            // Actually, main is flex:1. So left:50% of main is correct.
-            // But if sidebar is fixed (mobile), main covers whole screen.
-            // If sidebar is relative (desktop), main starts after 350px.
-            // So left: 50% is 50% of the MAIN area. That is correct in both cases.
-            // NO offset needed if we are inside MAIN. 
-            // PREVIOUS CODE had marginLeft: 175px ?? 
-            // Ah, previous code had these buttons OUTSIDE main? No, inside main.
-            // Line 660 was closing main. Yes, buttons were inside main.
-            // So left: 50% relative to Main is correct. We don't need marginLeft: 175px at all.
-            // Wait, previous code had marginLeft: '175px'. Why?
-            // Maybe because sidebar was fixed overlay on desktop too? No, relative.
-            // Let's remove the margin offset.
-          }}>
-            <button
-              onClick={handlePrevious}
-              disabled={currentIndex === 0}
-              style={{
-                width: '60px',
-                height: '60px',
-                borderRadius: '50%',
-                background: 'var(--bg-secondary)',
-                border: '2px solid var(--border-color)',
-                fontSize: '1.5rem',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: currentIndex === 0 ? 'not-allowed' : 'pointer',
-                opacity: currentIndex === 0 ? 0.3 : 1,
-                backdropFilter: 'blur(10px)',
-                WebkitBackdropFilter: 'blur(10px)'
-              }}
-            >
-              ←
-            </button>
-            <button
-              onClick={() => handleSwipe('right')}
-              disabled={currentIndex >= filteredProducts.length - 1}
-              style={{
-                width: '60px',
-                height: '60px',
-                borderRadius: '50%',
-                background: 'var(--accent-color)',
-                fontSize: '1.5rem',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: currentIndex >= filteredProducts.length - 1 ? 'not-allowed' : 'pointer',
-                opacity: currentIndex >= filteredProducts.length - 1 ? 0.3 : 1,
-                boxShadow: '0 4px 12px rgba(99, 102, 241, 0.4)'
-              }}
-            >
-              →
-            </button>
           </div>
         )}
       </main>
@@ -755,7 +999,6 @@ function App() {
   );
 }
 
-// Swipeable Cards Component
 function SwipeableCards({ cards, currentIndex, totalCards, onSwipe, onDelete, onToggleFavorite, scale }) {
   const [dragStart, setDragStart] = useState(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
@@ -769,21 +1012,17 @@ function SwipeableCards({ cards, currentIndex, totalCards, onSwipe, onDelete, on
 
   const handleDragMove = (clientX, clientY) => {
     if (!dragStart) return;
-
-    const offset = {
+    setDragOffset({
       x: clientX - dragStart.x,
       y: clientY - dragStart.y
-    };
-    setDragOffset(offset);
+    });
   };
 
   const handleDragEnd = () => {
     if (!dragStart) return;
 
-    const threshold = 100;
-
+    const threshold = 80;
     if (Math.abs(dragOffset.x) > threshold) {
-      // Swipe detected
       const direction = dragOffset.x > 0 ? 'right' : 'left';
       onSwipe(direction);
     }
@@ -793,12 +1032,8 @@ function SwipeableCards({ cards, currentIndex, totalCards, onSwipe, onDelete, on
     setDragging(false);
   };
 
-  // Mouse events
   const handleMouseDown = (e) => {
-    // Don't start drag if clicking on delete button or favorite button
-    if (e.target.closest('.delete-btn') || e.target.closest('.favorite-btn')) {
-      return;
-    }
+    if (e.target.closest('.card-action-btn')) return;
     e.preventDefault();
     handleDragStart(e.clientX, e.clientY);
   };
@@ -813,12 +1048,8 @@ function SwipeableCards({ cards, currentIndex, totalCards, onSwipe, onDelete, on
     handleDragEnd();
   };
 
-  // Touch events
   const handleTouchStart = (e) => {
-    // Don't start drag if touching delete button or favorite button
-    if (e.target.closest('.delete-btn') || e.target.closest('.favorite-btn')) {
-      return;
-    }
+    if (e.target.closest('.card-action-btn')) return;
     const touch = e.touches[0];
     handleDragStart(touch.clientX, touch.clientY);
   };
@@ -847,23 +1078,32 @@ function SwipeableCards({ cards, currentIndex, totalCards, onSwipe, onDelete, on
   if (cards.length === 0) {
     return (
       <div style={{
-        flex: 1,
         display: 'flex',
+        flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-        color: 'var(--text-secondary)'
+        color: 'var(--text-muted)',
+        textAlign: 'center',
+        padding: '2rem'
       }}>
-        <p>No more cards to show</p>
+        <span style={{ fontSize: '3rem', marginBottom: '1rem' }}>🎉</span>
+        <h3 style={{ fontSize: '1.25rem', color: 'var(--text-primary)', marginBottom: '0.5rem' }}>
+          You've reviewed all cards!
+        </h3>
+        <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+          Switch back to Grid view or check your favorites shortlist.
+        </p>
       </div>
     );
   }
 
-  const rotation = dragOffset.x / 20;
-  const opacity = Math.max(0, 1 - Math.abs(dragOffset.x) / 200);
+  const rotation = dragOffset.x / 18;
+  const opacity = Math.max(0.2, 1 - Math.abs(dragOffset.x) / 280);
 
   return (
     <div style={{
-      flex: 1,
+      width: '100%',
+      height: '100%',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
@@ -872,18 +1112,18 @@ function SwipeableCards({ cards, currentIndex, totalCards, onSwipe, onDelete, on
     }}>
       <div style={{
         position: 'relative',
-        width: `${Math.min(450, 90)}%`,
-        maxWidth: `${450 * scale}px`,
-        // Responsive height: Use predefined scale but cap at 75vh for mobile
-        height: `min(${600 * scale}px, 70dvh)`,
+        width: 'min(420px, calc(100% - 2rem))',
+        maxWidth: `${420 * scale}px`,
+        height: `min(${560 * scale}px, calc(100% - 1.5rem))`,
+        maxHeight: '560px',
         perspective: '1000px',
-        touchAction: 'none' // Prevent browser scrolling while swiping
+        touchAction: 'none'
       }}>
         {cards.map((product, index) => {
           const isTop = index === 0;
           const offset = index * 10;
-          const cardScale = 1 - index * 0.05;
-          const cardOpacity = Math.max(0.5, 1 - index * 0.2);
+          const cardScale = 1 - index * 0.04;
+          const cardOpacity = Math.max(0.4, 1 - index * 0.22);
 
           return (
             <div
@@ -909,33 +1149,44 @@ function SwipeableCards({ cards, currentIndex, totalCards, onSwipe, onDelete, on
                 userSelect: 'none'
               }}
             >
-              <ProductCard product={product} onDelete={onDelete} onToggleFavorite={onToggleFavorite} />
+              <ProductCard
+                product={product}
+                onDelete={onDelete}
+                onToggleFavorite={onToggleFavorite}
+                isSwipeMode={true}
+              />
             </div>
           );
         })}
 
-        {/* Swipe indicators */}
-        {dragging && Math.abs(dragOffset.x) > 50 && (
+        {/* Swipe Feedback Overlay Icons */}
+        {dragging && Math.abs(dragOffset.x) > 40 && (
           <div style={{
             position: 'absolute',
-            top: '50%',
-            left: dragOffset.x > 0 ? 'auto' : '2rem',
-            right: dragOffset.x > 0 ? '2rem' : 'auto',
+            top: '40%',
+            left: dragOffset.x > 0 ? 'auto' : '1.5rem',
+            right: dragOffset.x > 0 ? '1.5rem' : 'auto',
             transform: 'translateY(-50%)',
-            fontSize: '3rem',
-            opacity: Math.min(1, Math.abs(dragOffset.x) / 100),
+            fontSize: '2.5rem',
+            background: dragOffset.x > 0 ? 'rgba(99, 102, 241, 0.85)' : 'rgba(239, 68, 68, 0.85)',
+            color: 'white',
+            width: '60px',
+            height: '60px',
+            borderRadius: '50%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.4)',
             pointerEvents: 'none',
             zIndex: 1000
           }}>
-            {dragOffset.x > 0 ? '→' : '←'}
+            {dragOffset.x > 0 ? '♥' : '✕'}
           </div>
         )}
       </div>
     </div>
   );
 }
-
-export default App;
 
 function LoginPage({ onLogin }) {
   const [isRegister, setIsRegister] = useState(false);
@@ -969,66 +1220,114 @@ function LoginPage({ onLogin }) {
 
   return (
     <div style={{
+      width: '100%',
       height: '100dvh',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      background: 'var(--bg-primary)',
-      color: 'var(--text-primary)'
+      background: 'radial-gradient(circle at 50% 20%, #1f1f2e 0%, #0a0a0c 70%)',
+      padding: '1rem',
+      boxSizing: 'border-box'
     }}>
-      <div className="glass-panel" style={{ padding: '2rem', width: '100%', maxWidth: '400px', background: 'var(--bg-secondary)', borderRadius: '16px', border: '1px solid var(--border-color)' }}>
-        <h2 style={{ marginBottom: '1.5rem', fontSize: '1.5rem', fontWeight: 'bold' }}>
-          {isRegister ? 'Create Account' : 'Welcome to OmniShop'}
-        </h2>
+      <div
+        className="glass-panel"
+        style={{
+          padding: '2.25rem 2rem',
+          width: '100%',
+          maxWidth: '400px',
+          boxSizing: 'border-box',
+          boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.7)'
+        }}
+      >
+        <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
+          <h1 style={{
+            fontSize: '1.85rem',
+            fontWeight: '800',
+            background: 'linear-gradient(135deg, #ffffff 0%, #a1a1aa 100%)',
+            WebkitBackgroundClip: 'text',
+            WebkitTextFillColor: 'transparent',
+            marginBottom: '0.35rem',
+            letterSpacing: '-0.02em'
+          }}>
+            ShopDeck
+          </h1>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+            {isRegister ? 'Create an account to start your shortlist' : 'Sign in to access your saved lists'}
+          </p>
+        </div>
 
-        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-            <label style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>Username</label>
+        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1.15rem' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', textAlign: 'left' }}>
+            <label style={{ fontSize: '0.8rem', fontWeight: '600', color: 'var(--text-secondary)' }}>
+              Username
+            </label>
             <input
               type="text"
               required
               value={username}
               onChange={e => setUsername(e.target.value)}
-              style={{ padding: '0.75rem', borderRadius: '8px', border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', outline: 'none' }}
+              placeholder="e.g. gaurav"
+              style={{ fontSize: '0.95rem' }}
             />
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-            <label style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>Password</label>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', textAlign: 'left' }}>
+            <label style={{ fontSize: '0.8rem', fontWeight: '600', color: 'var(--text-secondary)' }}>
+              Password
+            </label>
             <input
               type="password"
               required
               value={password}
               onChange={e => setPassword(e.target.value)}
-              style={{ padding: '0.75rem', borderRadius: '8px', border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', outline: 'none' }}
+              placeholder="••••••••"
+              style={{ fontSize: '0.95rem' }}
             />
           </div>
 
-          {error && <div style={{ color: '#ef4444', fontSize: '0.875rem', padding: '0.5rem', background: 'rgba(239, 68, 68, 0.1)', borderRadius: '4px' }}>{error}</div>}
+          {error && (
+            <div style={{ color: '#f87171', fontSize: '0.825rem', padding: '0.6rem', background: 'var(--danger-light)', borderRadius: '6px' }}>
+              {error}
+            </div>
+          )}
 
-          <button type="submit" disabled={loading} style={{
-            padding: '0.75rem',
-            borderRadius: '8px',
-            background: 'var(--accent-color)',
-            color: 'white',
-            fontWeight: '600',
-            border: 'none',
-            cursor: 'pointer',
-            opacity: loading ? 0.7 : 1,
-            marginTop: '0.5rem'
-          }}>
-            {loading ? 'Please wait...' : (isRegister ? 'Sign Up' : 'Log In')}
+          <button
+            type="submit"
+            disabled={loading}
+            style={{
+              padding: '0.8rem',
+              borderRadius: '10px',
+              background: 'var(--accent-color)',
+              color: 'white',
+              fontWeight: '600',
+              fontSize: '0.95rem',
+              border: 'none',
+              marginTop: '0.5rem'
+            }}
+          >
+            {loading ? 'Please wait...' : (isRegister ? 'Create Account' : 'Sign In')}
           </button>
         </form>
 
-        <div style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid var(--border-color)', textAlign: 'center' }}>
+        <div style={{ marginTop: '1.75rem', paddingTop: '1.25rem', borderTop: '1px solid var(--border-color)', textAlign: 'center' }}>
           <button
-            onClick={() => setIsRegister(!isRegister)}
-            style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: '0.875rem' }}
+            type="button"
+            onClick={() => { setIsRegister(!isRegister); setError(''); }}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--text-secondary)',
+              fontSize: '0.85rem',
+              padding: '0.25rem',
+              cursor: 'pointer'
+            }}
           >
-            {isRegister ? 'Already have an account? Log In' : 'New here? Create Account'}
+            {isRegister ? 'Already have an account? Sign In' : "Don't have an account? Create one"}
           </button>
         </div>
       </div>
     </div>
   );
 }
+
+export default App;

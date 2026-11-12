@@ -1,129 +1,157 @@
-# GS-OmniShop
+# ShopDeck
 
-**Singapore Product Shortlist** - A universal product visualizer for managing shopping links across multiple e-commerce platforms.
+A visual shopping shortlist and decision engine for events, outfits, and multi-store product comparisons with a Tinder-style swipe interface.
 
-## Features
+## Quick Demo
 
-- 🎨 **Modern Dark UI** - Beautiful glassmorphism design with smooth animations
-- 🔗 **Universal Link Parser** - Paste links from any shopping site (Amazon, Flipkart, Myntra, etc.)
-- 📱 **Dual View Modes** 
-  - Grid View - See all products at once
-  - Swipe View - Tinder-style card interface
-- 🏷️ **Smart Categorization** - Auto-categorize products into clothes, shoes, and more
-- 💾 **Persistent Storage** - SQLite database with caching for fast performance
-- 🔍 **Web Scraping** - Automatically extracts product details, images, and prices
-- ⚡ **Real-time Updates** - Hot module replacement for smooth development
+![ShopDeck in action](assets/demo.gif)
 
-## Tech Stack
+- **Live tunnel demo**: [https://corliss-unveracious-onward.ngrok-free.dev](https://corliss-unveracious-onward.ngrok-free.dev)
+- **Local URL**: `http://localhost:5173`
 
-### Frontend
-- **React** with Vite
-- Vanilla CSS with CSS Variables
-- Responsive design with mobile support
+> ⚠️ **Project Status**: ShopDeck is currently a **Proof of Concept (PoC)** designed for personal, local-first use. It runs right on your local machine for your own shopping workflows. Additional features, hardened security, and advanced authentication techniques will be added over time. Feedback, bug reports, and feature requests are very welcome!
 
-### Backend
-- **Node.js** with Express
-- **Puppeteer** for web scraping
-- **SQLite** for data persistence
-- **Better-SQLite3** for synchronous database operations
+---
 
-## Getting Started
+## 🎯 The Problem
+
+When preparing for an event — a wedding, vacation, party, date, or interview — you rarely buy everything from a single website. You hunt across multiple stores (Amazon, Myntra, Zara, Ajio, Nike, ASOS) for dresses, shoes, bags, and accessories.
+
+This creates several common headaches:
+
+1. **The "Blue Link" Graveyard**: Links get scattered across WhatsApp chats, Apple Notes, Google Keep, or buried browser bookmarks. A raw URL gives you zero visual context.
+2. **Tab Overload & Context Switching**: To review your options, you open 20 browser tabs, wait for heavy ecommerce pages to load, dodge popups and cookie banners, and try to remember how item #3 compared to item #17.
+3. **The "Final Pick" Dilemma (Decision Fatigue)**: You find 5 pairs of shoes that match your outfit, but you only need to buy one. Comparing them side-by-side across different store layouts and zooming levels is frustrating and inefficient.
+4. **No Unified Look Coordination**: There is no easy way to view your shortlisted dress, shoes, bag, and jewelry together on one screen to see if they actually match.
+
+---
+
+## 💡 The Solution
+
+**ShopDeck** replaces messy link dumps with a unified, private visual deck.
+
+- **Drop links in, get products out**: Paste raw URLs, multi-line notes, or WhatsApp message dumps. ShopDeck extracts titles, product images, prices, and sizes automatically.
+- **Unified Outfit Canvas**: See your entire look — shoes, dresses, accessories — rendered cleanly side-by-side in one responsive dark-mode view.
+- **Tinder-Style Swipe Decision Engine (USP)**: When you've shortlisted 5 options and need to pick the winner, switch to Swipe Mode. Review each item in isolation, favorite contenders, and eliminate the rest with quick keyboard taps or swipe gestures.
+
+---
+
+## ✨ Professional Feature List
+
+### 🛍️ Smart Ingestion & Auto-Scraping
+- **Universal Link Parser**: Paste a single link, a batch of URLs, or an unformatted WhatsApp chat snippet. ShopDeck extracts and deduplicates the links.
+- **Multi-Store Metadata Extraction**: Pulls clean thumbnails, product titles, prices, and sizes using JSON-LD, OpenGraph, and tailored fallback heuristics.
+- **File Upload Support**: Directly import `.txt`, `.csv`, or `.json` files containing product links.
+- **Local SQLite Caching**: Scraped items are hashed (MD5) and cached locally so product decks load instantly without re-scraping.
+
+### 🃏 The Decision Engine (Tinder-Style Swipe)
+- **1-on-1 Focused Comparison**: Swipe through candidates one card at a time to eliminate distraction and make quick purchase decisions.
+- **Tactile Bottom Control Dock**: Quick-action buttons for Rewind (`←`), Pass / Delete (`✕`), Favorite (`♥`), Direct Store Visit (`↗`), and Advance (`→`).
+- **Keyboard Navigation**:
+  - `Left Arrow` (`←`): Return to previous item
+  - `Right Arrow` (`→`): Advance to next item
+  - `Spacebar`: Open the retailer's product page in a new tab
+- **Swipe Feedback Indicators**: Visual cues for smooth mouse drag or mobile touch gestures.
+
+### 📁 Event & Collection Workspaces
+- **Multi-Workspace Organization**: Organize shortlists by event or theme (e.g., *Summer Wedding*, *Bali Vacation*, *Interview Prep*).
+- **Auto-Categorization**: Intelligent keyword tagging categorizes items automatically into *Clothes*, *Shoes*, *Jewellery*, and *Other*.
+- **Favorites Filter**: Instantly isolate shortlisted items with a single tap on the `♥ Favorites` filter.
+
+### 💻 Unified Responsive Grid
+- **Adaptive Screen Sizing**: Clean 2-column layout on phones; auto-expanding multi-column layout on tablets and desktops.
+- **Zoom / Scale Control**: Real-time card scale slider (`−` / `+`) to view more products at a glance or inspect card details.
+- **Direct Checkout Links**: Every card has a direct store link button to jump straight to the merchant's checkout page.
+
+### 🔒 Privacy, Security & Portability
+- **SSRF Protection**: Scraping engine validates URLs and strictly blocks private subnets (`10.x`, `172.16-31.x`, `192.168.x`), loopback addresses (`localhost`, `127.0.0.1`), and cloud metadata IP ranges (`169.254.169.254`).
+- **Local-First Privacy**: All lists, user accounts, and cached product data stay in your local database file (`server/products.db`).
+- **Multi-User Accounts**: Built-in authentication so friends or family can maintain separate wishlists.
+- **Zero-Config Remote Sharing**: Built-in ngrok integration to generate a secure public link for reviewing shortlists on mobile with family or friends.
+
+---
+
+## 🚀 Quickstart
 
 ### Prerequisites
-- Node.js (v14 or higher)
-- npm or yarn
 
-### Installation
+- Node.js 20 or 22 LTS (pinned in `.nvmrc`)
+- npm 9+
+- *(Optional)* [ngrok](https://ngrok.com) for remote tunnel sharing
 
-1. Clone the repository:
+### 1. Installation
+
 ```bash
-git clone https://github.com/YOUR_USERNAME/shopping.git
-cd shopping
+git clone https://github.com/gdroid7/shopDeck.git
+cd shopDeck
+
+# Pin to Node 22 LTS if using nvm
+nvm use
+
+# Install dependencies across root, server, and client in one step
+npm run setup
 ```
 
-2. Install dependencies for both client and server:
-```bash
-# Install server dependencies
-cd server
-npm install
+### 2. Environment (Optional)
 
-# Install client dependencies
-cd ../client
-npm install
+```bash
+cp .env.example .env
 ```
 
-### Running the Application
+### 3. Run Development
 
-1. Start the server (from the `server` directory):
+**Local development (Web + API):**
 ```bash
-cd server
+npm run dev:local
+```
+
+**Full development with remote tunnel (Web + API + Ngrok):**
+```bash
 npm run dev
 ```
 
-2. Start the client (from the `client` directory):
-```bash
-cd client
-npm run dev
-```
+Open [http://localhost:5173](http://localhost:5173). Initial default credentials: `admin` / `admin` (or register a new user on the sign-in screen).
 
-3. Open your browser and navigate to `http://localhost:5173`
+---
 
-## Usage
-
-1. **Add Products**: Paste shopping URLs or WhatsApp messages containing links into the text area
-2. **Upload Files**: Upload .txt, .csv, or .json files containing product links
-3. **Switch Views**: Toggle between Grid and Swipe modes
-4. **Filter Categories**: Filter products by All, Clothes, or Shoes
-5. **Adjust Card Size**: Use the slider to change product card sizes
-6. **Delete Products**: Click the × button to remove unwanted products
-
-## API Endpoints
-
-- `POST /api/scrape` - Scrape product data from URLs
-- `GET /api/products` - Retrieve all stored products
-- `DELETE /api/products/:id` - Delete a specific product
-
-## Project Structure
+## 📂 Project Architecture
 
 ```
-shopping/
-├── client/               # React frontend
+├── client/                     # React 19 + Vite frontend
 │   ├── src/
-│   │   ├── components/   # React components
-│   │   ├── App.jsx       # Main app component
-│   │   └── index.css     # Global styles
-│   └── package.json
-├── server/               # Express backend
-│   ├── index.js          # Server entry point
-│   ├── scraper.js        # Puppeteer scraping logic
-│   └── package.json
-└── README.md
+│   │   ├── components/         # ProductCard, ConfirmDialog
+│   │   ├── App.jsx             # Main dashboard, swipe deck & workspaces
+│   │   └── index.css           # Glassmorphism dark theme styling
+│   └── vite.config.js          # Reverse proxy and ngrok allowed hosts
+├── server/                     # Express backend
+│   ├── index.js                # API routes, auth, scraper & SQLite schema
+│   └── products.db             # Local SQLite database
+├── scripts/
+│   ├── start-ngrok.js          # Port scanner & ngrok tunnel launcher
+│   └── record-demo-gif.js      # Headless browser demo recording automation
+├── assets/
+│   └── demo.gif                # Animated showcase preview
+└── package.json                # Root automation scripts
 ```
 
-## Features in Detail
+---
 
-### Web Scraping
-The application uses Puppeteer to intelligently scrape product information from various e-commerce sites, extracting:
-- Product titles
-- Prices
-- Images
-- Product URLs
-- Sizes (where available)
+## 🛠️ Status, Roadmap & Feedback
 
-### Smart Caching
-Database caching is enabled by default to reduce scraping load and improve performance. Products are stored locally and retrieved instantly on subsequent visits.
+ShopDeck is an early **Proof of Concept**. It is currently designed to run locally on your machine for personal outfit and event curation.
 
-### Category Detection
-The app automatically categorizes products based on keywords in titles and URLs, making it easy to filter your shortlist.
+### 🔮 Planned Next Steps
+- [ ] Hardened production authentication (OAuth, magic links, session expiry management)
+- [ ] Browser extension for 1-click clipping from any shopping site
+- [ ] Side-by-side color matching and outfit collage boards
+- [ ] Export shortlists to PDF or image lookbooks
+- [ ] Currency conversion and price tracking
 
-## Contributing
+### 💬 Issues & Feature Requests
+Feedback, ideas, and bug reports are warmly welcome! If you have suggestions or encounter an issue with a specific retailer's links, please [open an issue](https://github.com/gdroid7/shopDeck/issues).
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+---
 
-## License
+## 📄 License
 
-This project is open source and available under the MIT License.
-
-## Author
-
-Gaurav Singh
+MIT © [gdroid7](https://github.com/gdroid7)

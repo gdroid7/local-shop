@@ -5,17 +5,23 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 // Feature Flag for Database Caching
 const ENABLE_DB_CACHE = process.env.USE_DATABASE !== 'false';
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'products.db');
 
 // Initialise Database
 let db;
 if (ENABLE_DB_CACHE) {
-  db = new Database('products.db');
+  db = new Database(DB_PATH);
   db.pragma('foreign_keys = ON');
 
 
@@ -58,7 +64,8 @@ if (ENABLE_DB_CACHE) {
 
   // Ensure default admin user
   if (!db.prepare('SELECT id FROM users WHERE id = 1').get()) {
-    const hash = crypto.createHash('sha256').update('password').digest('hex');
+    const adminPassword = process.env.ADMIN_DEFAULT_PASSWORD || 'admin';
+    const hash = crypto.createHash('sha256').update(adminPassword).digest('hex');
     db.prepare('INSERT INTO users (id, username, password) VALUES (1, ?, ?)').run('admin', hash);
   }
 
@@ -179,12 +186,49 @@ const generateHash = (text) => {
   return crypto.createHash('md5').update(text).digest('hex');
 };
 
-// Helper: Extract valid URLs from arbitrary text
+// Helper: Check if URL is safe to scrape (blocks internal networks, loopback, cloud metadata)
+const isSafeUrl = (urlStr) => {
+  try {
+    const parsed = new URL(urlStr);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return false;
+    }
+    const hostname = parsed.hostname.toLowerCase();
+
+    // Disallow loopback / localhost
+    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '0.0.0.0') {
+      return false;
+    }
+
+    // Disallow Cloud Metadata and Link-Local
+    if (hostname === '169.254.169.254' || hostname === 'metadata.google.internal' || hostname.endsWith('.internal')) {
+      return false;
+    }
+
+    // Disallow private IPv4 ranges (10.x, 192.168.x, 172.16-31.x)
+    const ipMatch = hostname.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+    if (ipMatch) {
+      const b0 = parseInt(ipMatch[1], 10);
+      const b1 = parseInt(ipMatch[2], 10);
+      if (b0 === 10) return false;
+      if (b0 === 192 && b1 === 168) return false;
+      if (b0 === 172 && b1 >= 16 && b1 <= 31) return false;
+      if (b0 === 127) return false;
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+// Helper: Extract valid and safe URLs from arbitrary text
 const extractUrlsFromText = (text) => {
   const urlRegex = /(https?:\/\/[^\s]+)/g;
   const matches = text.match(urlRegex) || [];
-  return matches.map(url => url.replace(/[.,;)]+$/, ''));
-
+  return matches
+    .map(url => url.replace(/[.,;)]+$/, ''))
+    .filter(url => isSafeUrl(url));
 };
 
 const SITE_CONFIGS = [
@@ -205,8 +249,9 @@ const SITE_CONFIGS = [
   {
     name: 'ajio',
     domains: ['ajio'],
-    titleSelectors: ['h1.prod-name'],
-    priceSelectors: ['.prod-sp']
+    titleSelectors: ['h1.prod-name', '.prod-name', '.pdp-title'],
+    imageSelectors: ['img.img-alignment', '.rilrtl-lazy-img-loaded', '.rilrtl-lazy-img'],
+    priceSelectors: ['.prod-sp', '.prod-cp', '.prod-price-section .prod-sp']
   },
   {
     name: 'bewakoof',
@@ -237,6 +282,37 @@ const SITE_CONFIGS = [
     domains: ['nykaafashion'],
     titleSelectors: ['h1'],
     priceSelectors: ['span.css-1jczs19']
+  },
+  {
+    name: 'palmonas',
+    domains: ['palmonas'],
+    titleSelectors: ['h1.t4s-product__title', 'h1.product_title', 'h1'],
+    priceSelectors: ['.t4s-product-price', '.price__regular .price-item', '.price-item--regular', '.money']
+  },
+  {
+    name: 'skechers',
+    domains: ['skechers'],
+    priceSelectors: ['.t4s-product-price', '.price__regular .price-item', '.price-item--regular', '.money']
+  },
+  {
+    name: 'skechers',
+    domains: ['skechers'],
+    titleSelectors: ['.product-name', 'h1.product-name'],
+    imageSelectors: ['#myimage', '.modal-open-zoom', '.product-image-main img'],
+    priceSelectors: ['.price-sales', '.prices .sales']
+  },
+  {
+    name: 'bata',
+    domains: ['bata'],
+    titleSelectors: ['h1.product-name', '.product-name'],
+    priceSelectors: ['.sales .value', '.price-sales']
+  },
+  {
+    name: 'redtape',
+    domains: ['redtape'],
+    titleSelectors: ['.product__title h1', 'h1'],
+    imageSelectors: ['.product__media img', '.product__media-item img'],
+    priceSelectors: ['.price-item--sale', '.price-item--regular']
   }
 ];
 
@@ -279,17 +355,26 @@ const extractPrice = ($, siteConfig) => {
 
       for (const item of items) {
         if (item['@type'] === 'Product' || item['@type'] === 'ProductGroup') {
+          // Extract Price
           const offers = Array.isArray(item.offers) ? item.offers[0] : item.offers;
           if (offers) {
             if (offers.price) {
               price = `${offers.priceCurrency || ''} ${offers.price}`;
-              break;
-            }
-            if (offers.lowPrice) {
+            } else if (offers.lowPrice) {
               price = `${offers.priceCurrency || ''} ${offers.lowPrice}`;
-              break;
             }
           }
+
+          // Extract Image if not already found from meta
+          if (!image) {
+            if (item.image) {
+              if (Array.isArray(item.image)) image = item.image[0];
+              else if (typeof item.image === 'string') image = item.image;
+              else if (item.image.url) image = item.image.url;
+            }
+          }
+
+          if (price) break;
         }
       }
     } catch (e) { }
@@ -516,10 +601,15 @@ app.post('/api/scrape', requireAuth, async (req, res) => {
 
       const siteConfig = getSiteConfig(url);
 
-      const { data } = await axios.get(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      const getHeaders = (u) => {
+        const isAjio = u.toLowerCase().includes('ajio');
+        const ua = isAjio
+          ? 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1'
+          : 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+        return {
+          'User-Agent': ua,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
           'Accept-Language': 'en-US,en;q=0.9',
           'Accept-Encoding': 'gzip, deflate, br',
           'Connection': 'keep-alive',
@@ -527,16 +617,22 @@ app.post('/api/scrape', requireAuth, async (req, res) => {
           'Sec-Fetch-Dest': 'document',
           'Sec-Fetch-Mode': 'navigate',
           'Sec-Fetch-Site': 'none',
-          'Sec-Fetch-User': '?1'
-        },
+          'Sec-Fetch-User': '?1',
+          'Referer': 'https://www.google.com/'
+        };
+      };
+
+      const { data } = await axios.get(url, {
+        headers: getHeaders(url),
         timeout: 10000 // 10s timeout
       });
 
       const $ = cheerio.load(data);
 
       let title = $('meta[property="og:title"]').attr('content') || $('title').text() || 'No Title';
-      let image = $('meta[property="og:image"]').attr('content') || $('img').first().attr('src') || '';
+      let image = null;
 
+      // 1. Site Specific Config
       if (siteConfig) {
         if (siteConfig.titleSelectors) {
           const extractedTitle = extractFromSelectors($, siteConfig.titleSelectors);
@@ -548,6 +644,36 @@ app.post('/api/scrape', requireAuth, async (req, res) => {
         }
       }
 
+      // 2. Open Graph
+      if (!image) {
+        image = $('meta[property="og:image"]').attr('content');
+      }
+
+      // 3. JSON-LD
+      if (!image) {
+        try {
+          $('script[type="application/ld+json"]').each((i, el) => {
+            if (image) return;
+            const content = $(el).html();
+            if (!content) return;
+            const data = JSON.parse(content);
+            const items = Array.isArray(data) ? data : [data];
+            for (const item of items) {
+              if ((item['@type'] === 'Product' || item['@type'] === 'ProductGroup') && item.image) {
+                if (Array.isArray(item.image)) image = item.image[0];
+                else if (typeof item.image === 'string') image = item.image;
+                else if (item.image.url) image = item.image.url;
+                if (image) break;
+              }
+            }
+          });
+        } catch (e) { }
+      }
+
+      // 4. Fallback to first image (if not SVG/small icons ideally, but simplistic for now)
+      if (!image) {
+        image = $('img').first().attr('src') || '';
+      }
       const price = extractPrice($, siteConfig);
       const size = extractSize($);
 
