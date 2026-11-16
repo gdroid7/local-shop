@@ -1,2 +1,5 @@
-# Netlify SPA routing fallback
-/*    /index.html   200
+# Proxy /api requests to Render backend
+/api/*  https://shopdeck-api.onrender.com/api/:splat  200!
+
+# SPA fallback
+/*  /index.html  200

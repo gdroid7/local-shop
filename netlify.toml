@@ -3,6 +3,13 @@
   command = "npm run build"
   publish = "dist"
 
+# Proxy /api requests directly to live Render backend (solves CORS and relative URL routing)
+[[redirects]]
+  from = "/api/*"
+  to = "https://shopdeck-api.onrender.com/api/:splat"
+  status = 200
+  force = true
+
 # Single Page App routing fallback: redirects all non-file routes to index.html
 [[redirects]]
   from = "/*"

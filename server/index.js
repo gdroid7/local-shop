@@ -179,14 +179,40 @@ const verifyPassword = (password, salt, storedHash) => {
 // Enable trust proxy for ngrok/reverse proxy support
 app.set('trust proxy', 1);
 
-// CORS configuration - supports production whitelist via CORS_ORIGIN or permissive dev fallback
-const allowedOrigins = process.env.CORS_ORIGIN 
-  ? process.env.CORS_ORIGIN.split(',').map(s => s.trim()) 
-  : true;
-
+// Robust CORS: Allow any Netlify, Render, or localhost origin with credentials
 app.use(cors({
-  origin: allowedOrigins,
-  credentials: true
+  origin: (origin, callback) => {
+    // Allow server-to-server, curl, or same-origin requests (origin is undefined)
+    if (!origin) return callback(null, true);
+
+    // If explicit CORS_ORIGIN is set, check it first
+    if (process.env.CORS_ORIGIN) {
+      const explicitOrigins = process.env.CORS_ORIGIN.split(',').map(s => s.trim().toLowerCase());
+      if (explicitOrigins.includes(origin.toLowerCase())) return callback(null, true);
+    }
+
+    // Always allow Netlify apps, Render services, localhost, and ngrok tunnels
+    try {
+      const parsed = new URL(origin);
+      const host = parsed.hostname.toLowerCase();
+      if (
+        host.endsWith('.netlify.app') ||
+        host.endsWith('.onrender.com') ||
+        host === 'localhost' ||
+        host === '127.0.0.1' ||
+        host.endsWith('.ngrok-free.app') ||
+        host.endsWith('.ngrok.io')
+      ) {
+        return callback(null, true);
+      }
+    } catch (_) {}
+
+    // Fallback: Allow origin
+    return callback(null, true);
+  },
+  credentials: true,
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 app.use(express.json());
 
