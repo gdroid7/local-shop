@@ -353,7 +353,7 @@ app.get('/api/auth/github/callback', async (req, res) => {
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
     await db.run('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)', [token, user.id, expiresAt]);
 
-    const frontendBase = process.env.CLIENT_URL || req.headers.referer || '/';
+    const frontendBase = process.env.CLIENT_URL || process.env.FRONTEND_URL || 'https://shop-deck.netlify.app';
     const redirectUrl = new URL(frontendBase, `${req.protocol}://${req.get('host')}`);
     redirectUrl.searchParams.set('token', token);
     redirectUrl.searchParams.set('username', user.username);
