@@ -96,11 +96,11 @@ export async function initDb() {
   try {
     const userCols = await db.all('PRAGMA table_info(users)');
     const colNames = userCols.map(c => c.name);
-    if (!colNames.includes('salt')) await db.exec('ALTER TABLE users ADD COLUMN salt TEXT DEFAULT ""');
-    if (!colNames.includes('email')) await db.exec('ALTER TABLE users ADD COLUMN email TEXT DEFAULT ""');
-    if (!colNames.includes('google_id')) await db.exec('ALTER TABLE users ADD COLUMN google_id TEXT DEFAULT ""');
-    if (!colNames.includes('github_id')) await db.exec('ALTER TABLE users ADD COLUMN github_id TEXT DEFAULT ""');
-    if (!colNames.includes('avatar')) await db.exec('ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT ""');
+    if (!colNames.includes('salt')) await db.exec("ALTER TABLE users ADD COLUMN salt TEXT DEFAULT ''");
+    if (!colNames.includes('email')) await db.exec("ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''");
+    if (!colNames.includes('google_id')) await db.exec("ALTER TABLE users ADD COLUMN google_id TEXT DEFAULT ''");
+    if (!colNames.includes('github_id')) await db.exec("ALTER TABLE users ADD COLUMN github_id TEXT DEFAULT ''");
+    if (!colNames.includes('avatar')) await db.exec("ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT ''");
   } catch (e) {
     // PRAGMA table_info may vary or table is fresh
   }
@@ -121,7 +121,7 @@ export async function initDb() {
     const colNames = sessionCols.map(c => c.name);
     if (!colNames.includes('expires_at')) {
       await db.exec('ALTER TABLE sessions ADD COLUMN expires_at DATETIME DEFAULT NULL');
-      await db.exec('UPDATE sessions SET expires_at = datetime("now", "+30 days") WHERE expires_at IS NULL');
+      await db.exec("UPDATE sessions SET expires_at = datetime('now', '+30 days') WHERE expires_at IS NULL");
     }
     await db.exec('DELETE FROM sessions WHERE expires_at < CURRENT_TIMESTAMP');
   } catch (e) {

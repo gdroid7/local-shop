@@ -267,7 +267,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
     const email = (googleProfile.email || '').toLowerCase().trim();
     const avatar = googleProfile.picture || '';
 
-    let user = await db.get('SELECT * FROM users WHERE google_id = ? OR (email != "" AND lower(email) = ?)', [googleId, email]);
+    let user = await db.get("SELECT * FROM users WHERE google_id = ? OR (email != '' AND lower(email) = ?)", [googleId, email]);
 
     if (!user) {
       const baseName = (email ? email.split('@')[0] : (googleProfile.name || 'user')).replace(/[^a-zA-Z0-9_]/g, '').toLowerCase().slice(0, 15);
@@ -275,7 +275,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
       const username = existingUser ? `${baseName}_${Math.floor(100 + Math.random() * 900)}` : baseName;
 
       const result = await db.run(
-        'INSERT INTO users (username, password, salt, email, google_id, avatar) VALUES (?, "", "", ?, ?, ?)',
+        "INSERT INTO users (username, password, salt, email, google_id, avatar) VALUES (?, '', '', ?, ?, ?)",
         [username, email, googleId, avatar]
       );
       const userId = result.lastInsertRowid;
@@ -283,7 +283,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
       user = { id: userId, username };
     } else {
       if (!user.google_id) {
-        await db.run('UPDATE users SET google_id = ?, avatar = COALESCE(NULLIF(avatar, ""), ?) WHERE id = ?', [googleId, avatar, user.id]);
+        await db.run("UPDATE users SET google_id = ?, avatar = COALESCE(NULLIF(avatar, ''), ?) WHERE id = ?", [googleId, avatar, user.id]);
       }
     }
 
@@ -333,7 +333,7 @@ app.post('/api/auth/google', async (req, res) => {
     const email = (googleProfile.email || '').toLowerCase().trim();
     const avatar = googleProfile.picture || '';
 
-    let user = await db.get('SELECT * FROM users WHERE google_id = ? OR (email != "" AND lower(email) = ?)', [googleId, email]);
+    let user = await db.get("SELECT * FROM users WHERE google_id = ? OR (email != '' AND lower(email) = ?)", [googleId, email]);
 
     if (!user) {
       const baseName = (email ? email.split('@')[0] : (googleProfile.name || 'user')).replace(/[^a-zA-Z0-9_]/g, '').toLowerCase().slice(0, 15);
@@ -341,14 +341,14 @@ app.post('/api/auth/google', async (req, res) => {
       const username = existingUser ? `${baseName}_${Math.floor(100 + Math.random() * 900)}` : baseName;
 
       const result = await db.run(
-        'INSERT INTO users (username, password, salt, email, google_id, avatar) VALUES (?, "", "", ?, ?, ?)',
+        "INSERT INTO users (username, password, salt, email, google_id, avatar) VALUES (?, '', '', ?, ?, ?)",
         [username, email, googleId, avatar]
       );
       const userId = result.lastInsertRowid;
       await db.run('INSERT INTO workspaces (name, user_id) VALUES (?, ?)', ['My Collection', userId]);
       user = { id: userId, username };
     } else if (!user.google_id) {
-      await db.run('UPDATE users SET google_id = ?, avatar = COALESCE(NULLIF(avatar, ""), ?) WHERE id = ?', [googleId, avatar, user.id]);
+      await db.run("UPDATE users SET google_id = ?, avatar = COALESCE(NULLIF(avatar, ''), ?) WHERE id = ?", [googleId, avatar, user.id]);
     }
 
     const token = crypto.randomBytes(32).toString('hex');
