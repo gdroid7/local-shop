@@ -725,6 +725,50 @@ app.patch('/api/products/:id/favorite', requireAuth, async (req, res) => {
   }
 });
 
+const isBlockedTitle = (title) => {
+  if (!title) return true;
+  const lower = title.toLowerCase();
+  return (
+    lower.includes('site maintenance') ||
+    lower.includes('access denied') ||
+    lower.includes('security check') ||
+    lower.includes('robot or human') ||
+    lower.includes('just a moment') ||
+    lower.includes('attention required') ||
+    lower.includes('403 forbidden') ||
+    lower.includes('blocked')
+  );
+};
+
+const extractFallbackFromUrl = (targetUrl) => {
+  try {
+    const parsed = new URL(targetUrl);
+    const host = parsed.hostname.replace(/^www\./, '');
+    const parts = parsed.pathname.split('/').filter(p => p && !/^(buy|p|dp|gp|product|item|itm|index|html?|\d+)$/i.test(p));
+    if (parts.length === 0) return { title: host, brand: '' };
+    
+    let brand = '';
+    let slug = parts[parts.length - 1];
+    if (parts.length >= 2) {
+      brand = parts[parts.length - 2].replace(/[-_]/g, ' ');
+      brand = brand.charAt(0).toUpperCase() + brand.slice(1);
+    }
+    
+    let cleanTitle = decodeURIComponent(slug)
+      .replace(/[-_]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    cleanTitle = cleanTitle.charAt(0).toUpperCase() + cleanTitle.slice(1);
+    
+    if (brand && !cleanTitle.toLowerCase().includes(brand.toLowerCase())) {
+      cleanTitle = `${brand} - ${cleanTitle}`;
+    }
+    return { title: cleanTitle, brand };
+  } catch (_) {
+    return { title: 'Store Item', brand: '' };
+  }
+};
+
 app.post('/api/scrape', requireAuth, async (req, res) => {
   const { urls: rawInput, workspace_id } = req.body;
   if (!rawInput) {
@@ -795,16 +839,13 @@ app.post('/api/scrape', requireAuth, async (req, res) => {
       const siteConfig = getSiteConfig(url);
 
       const getHeaders = (u) => {
-        const isAjio = u.toLowerCase().includes('ajio');
-        const ua = isAjio
-          ? 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1'
-          : 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-
+        // High-success modern mobile User-Agent (Safari iOS 17.5) with Indian regional accept-language
+        // Mobile UAs dramatically reduce datacenter bot challenges on Indian e-commerce (Myntra, Ajio, Flipkart, Meesho, Zara)
         return {
-          'User-Agent': ua,
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Accept-Encoding': 'gzip, deflate, br',
+          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+          'Accept-Language': 'en-IN,en-US;q=0.9,en;q=0.8',
+          'Accept-Encoding': 'gzip, deflate',
           'Connection': 'keep-alive',
           'Upgrade-Insecure-Requests': '1',
           'Sec-Fetch-Dest': 'document',
@@ -817,12 +858,12 @@ app.post('/api/scrape', requireAuth, async (req, res) => {
 
       const { data } = await axios.get(url, {
         headers: getHeaders(url),
-        timeout: 10000 // 10s timeout
+        timeout: 10000
       });
 
       const $ = cheerio.load(data);
 
-      let title = $('meta[property="og:title"]').attr('content') || $('title').text() || 'No Title';
+      let title = $('meta[property="og:title"]').attr('content') || $('title').text() || '';
       let image = null;
 
       // 1. Site Specific Config
@@ -837,9 +878,12 @@ app.post('/api/scrape', requireAuth, async (req, res) => {
         }
       }
 
-      // 2. Open Graph
+      // 2. Open Graph & Twitter Card
       if (!image) {
-        image = $('meta[property="og:image"]').attr('content');
+        image = $('meta[property="og:image"]').attr('content') ||
+                $('meta[name="twitter:image"]').attr('content') ||
+                $('meta[property="og:image:secure_url"]').attr('content') ||
+                $('link[rel="image_src"]').attr('href');
       }
 
       // 3. JSON-LD
@@ -855,7 +899,7 @@ app.post('/api/scrape', requireAuth, async (req, res) => {
               if ((item['@type'] === 'Product' || item['@type'] === 'ProductGroup') && item.image) {
                 if (Array.isArray(item.image)) image = item.image[0];
                 else if (typeof item.image === 'string') image = item.image;
-                else if (item.image.url) image = item.image.url;
+                else if (item.image?.url) image = item.image.url;
                 if (image) break;
               }
             }
@@ -863,10 +907,25 @@ app.post('/api/scrape', requireAuth, async (req, res) => {
         } catch (e) { }
       }
 
-      // 4. Fallback to first image (if not SVG/small icons ideally, but simplistic for now)
+      // 4. Fallback to first non-icon image
       if (!image) {
-        image = $('img').first().attr('src') || '';
+        const potentialImages = $('img').map((i, el) => {
+          return $(el).attr('data-src') || $(el).attr('data-zoom-image') || $(el).attr('src') || '';
+        }).get().filter(src => src && /^https?:\/\//i.test(src) && !/\.(svg|gif)($|\?)/i.test(src) && !/(icon|logo|badge|avatar|spinner)/i.test(src));
+        
+        if (potentialImages.length > 0) {
+          image = potentialImages[0];
+        }
       }
+
+      // Check for Bot Gate / Site Maintenance page
+      const blocked = isBlockedTitle(title);
+      if (blocked) {
+        console.warn(`[SCRAPE BOT BLOCKED] ${url} returned "${title}". Recovering from URL slug.`);
+        const fallback = extractFallbackFromUrl(url);
+        title = fallback.title;
+      }
+
       const price = extractPrice($, siteConfig);
       const size = extractSize($);
 
@@ -875,8 +934,8 @@ app.post('/api/scrape', requireAuth, async (req, res) => {
         workspace_id: workspaceId,
         user_id: userId,
         url,
-        title: title.trim(),
-        image,
+        title: (title || 'Saved Product').trim(),
+        image: image || '',
         price,
         size,
         is_favorite: 0
@@ -884,13 +943,13 @@ app.post('/api/scrape', requireAuth, async (req, res) => {
 
       results.push(productData);
 
-      // 3. Store in DB if enabled
-      if (ENABLE_DB_CACHE) {
+      // Only store in DB if valid title & not bot blocked
+      if (ENABLE_DB_CACHE && !blocked && productData.title) {
         try {
           await db.run(`
-                INSERT OR REPLACE INTO products (id, workspace_id, user_id, url, title, image, price, size, is_favorite)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `, [
+            INSERT OR REPLACE INTO products (id, workspace_id, user_id, url, title, image, price, size, is_favorite)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `, [
             productData.id,
             productData.workspace_id,
             productData.user_id,
@@ -908,14 +967,18 @@ app.post('/api/scrape', requireAuth, async (req, res) => {
 
     } catch (error) {
       console.error(`Failed to scrape ${url}:`, error.message);
+      const fallback = extractFallbackFromUrl(url);
       results.push({
         id,
+        workspace_id: workspaceId,
+        user_id: userId,
         url,
-        error: 'Failed to load product data',
-        title: 'Error Loading Product',
+        error: 'Live store fetch blocked - metadata recovered from link',
+        title: fallback.title,
         image: '',
-        price: '',
-        size: ''
+        price: 'Check Store',
+        size: 'Visit Site',
+        is_favorite: 0
       });
     }
   }

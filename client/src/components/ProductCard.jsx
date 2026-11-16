@@ -74,6 +74,23 @@ const ProductCard = ({ product, onDelete, onToggleFavorite, isSwipeMode = false 
                 overflow: 'hidden',
                 ...(isSwipeMode ? { flex: '1 1 55%', minHeight: '200px' } : { aspectRatio: '1 / 1' })
             }}>
+                {/* Shimmer Placeholder while Image is Downloading */}
+                {image && !imageError && !imageLoaded && (
+                    <div
+                        className="shimmer-effect"
+                        style={{
+                            position: 'absolute',
+                            inset: 0,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            zIndex: 1
+                        }}
+                    >
+                        <span className="compact-spinner compact-spinner-accent" style={{ width: '20px', height: '20px' }} />
+                    </div>
+                )}
+
                 {image && !imageError ? (
                     <img
                         src={image}
@@ -89,8 +106,8 @@ const ProductCard = ({ product, onDelete, onToggleFavorite, isSwipeMode = false 
                             height: '100%',
                             objectFit: isSwipeMode ? 'contain' : 'cover',
                             backgroundColor: '#121216',
-                            transition: 'opacity 0.3s ease',
-                            opacity: imageLoaded ? 1 : 0.4
+                            transition: 'opacity 0.35s ease',
+                            opacity: imageLoaded ? 1 : 0
                         }}
                     />
                 ) : (
@@ -101,14 +118,36 @@ const ProductCard = ({ product, onDelete, onToggleFavorite, isSwipeMode = false 
                         flexDirection: 'column',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        gap: '0.5rem',
+                        gap: '0.65rem',
                         color: 'var(--text-muted)',
-                        background: 'linear-gradient(135deg, #18181e 0%, #121216 100%)',
-                        padding: '1rem',
+                        background: 'linear-gradient(145deg, #181820 0%, #0f0f14 100%)',
+                        padding: '1.25rem',
                         textAlign: 'center'
                     }}>
-                        <span style={{ fontSize: '2rem' }}>🛍️</span>
-                        <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{getDomain(url)}</span>
+                        <div style={{
+                            width: '42px',
+                            height: '42px',
+                            borderRadius: '10px',
+                            background: 'rgba(255, 255, 255, 0.05)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            border: '1px solid var(--border-color)',
+                            overflow: 'hidden'
+                        }}>
+                            <img
+                                src={`https://www.google.com/s2/favicons?domain=${getDomain(url)}&sz=64`}
+                                alt=""
+                                onError={(e) => { e.target.style.display = 'none'; }}
+                                style={{ width: '24px', height: '24px', objectFit: 'contain' }}
+                            />
+                        </div>
+                        <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: '500' }}>
+                            {getDomain(url)}
+                        </span>
+                        <span style={{ fontSize: '0.7rem', color: 'var(--accent-color)', opacity: 0.8 }}>
+                            Click to view item ↗
+                        </span>
                     </div>
                 )}
 
