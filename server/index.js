@@ -8,6 +8,7 @@ import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import { db, initDb } from './db.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,131 +18,13 @@ const PORT = process.env.PORT || 3000;
 
 // Feature Flag for Database Caching
 const ENABLE_DB_CACHE = process.env.USE_DATABASE !== 'false';
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'products.db');
 
-// Initialise Database with high-efficiency PRAGMAs (minimal RAM & WAL mode)
-let db;
+// Initialize Database (Turso Cloud if configured, or local SQLite)
 if (ENABLE_DB_CACHE) {
-  db = new Database(DB_PATH);
-  db.pragma('foreign_keys = ON');
-  db.pragma('journal_mode = WAL');
-  db.pragma('synchronous = NORMAL');
-  db.pragma('cache_size = -2000'); // Frugal memory cap: ~2MB RAM cache
-  db.pragma('temp_store = MEMORY');
-
-  // Create users table with salt support
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT UNIQUE NOT NULL,
-      password TEXT NOT NULL,
-      salt TEXT DEFAULT '',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
-  // Migration: Add salt to users if missing
-  const userCols = db.prepare('PRAGMA table_info(users)').all();
-  if (!userCols.find(c => c.name === 'salt')) {
-    db.exec('ALTER TABLE users ADD COLUMN salt TEXT DEFAULT ""');
-  }
-
-  // Create sessions table with expiration
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS sessions (
-      token TEXT PRIMARY KEY,
-      user_id INTEGER NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      expires_at DATETIME DEFAULT (datetime('now', '+30 days')),
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    )
-  `);
-
-  // Migration: Add expires_at to sessions if missing
-  const sessionCols = db.prepare('PRAGMA table_info(sessions)').all();
-  if (!sessionCols.find(c => c.name === 'expires_at')) {
-    db.exec('ALTER TABLE sessions ADD COLUMN expires_at DATETIME DEFAULT (datetime("now", "+30 days"))');
-  }
-
-  // Auto-clean expired sessions on startup
   try {
-    db.exec('DELETE FROM sessions WHERE expires_at < CURRENT_TIMESTAMP');
-  } catch (e) {
-    console.error('Session cleanup error:', e.message);
-  }
-
-  // Create workspaces table (Tenant-isolated per user_id)
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS workspaces (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER DEFAULT 1,
-      name TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    )
-  `);
-
-  // Migration: Add user_id to workspaces if missing
-  const wsCols = db.prepare('PRAGMA table_info(workspaces)').all();
-  if (!wsCols.find(c => c.name === 'user_id')) {
-    db.exec('ALTER TABLE workspaces ADD COLUMN user_id INTEGER DEFAULT 1');
-  }
-
-  // Ensure default admin user
-  if (!db.prepare('SELECT id FROM users WHERE id = 1').get()) {
-    const adminPassword = process.env.ADMIN_DEFAULT_PASSWORD || 'admin';
-    const hash = crypto.createHash('sha256').update(adminPassword).digest('hex');
-    db.prepare('INSERT INTO users (id, username, password) VALUES (1, ?, ?)').run('admin', hash);
-  }
-
-  // Create products table with tenant isolation (user_id + workspace_id)
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS products (
-      id TEXT,
-      workspace_id INTEGER DEFAULT 1,
-      user_id INTEGER DEFAULT 1,
-      url TEXT,
-      title TEXT,
-      image TEXT,
-      price TEXT,
-      size TEXT,
-      is_favorite INTEGER DEFAULT 0,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      PRIMARY KEY (id, workspace_id),
-      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    )
-  `);
-
-  // Migration: Add user_id to products if missing and backfill from workspace
-  const productCols = db.prepare('PRAGMA table_info(products)').all();
-  if (!productCols.find(c => c.name === 'user_id')) {
-    db.exec('ALTER TABLE products ADD COLUMN user_id INTEGER DEFAULT 1');
-    try {
-      db.exec(`
-        UPDATE products 
-        SET user_id = (SELECT user_id FROM workspaces WHERE workspaces.id = products.workspace_id)
-        WHERE user_id IS NULL OR user_id = 1
-      `);
-    } catch (e) {
-      console.error('Backfill products user_id error:', e.message);
-    }
-  }
-
-  // Tenant-isolation indexes for rapid querying and zero scan overhead
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_products_workspace ON products(workspace_id);
-    CREATE INDEX IF NOT EXISTS idx_products_user ON products(user_id);
-    CREATE INDEX IF NOT EXISTS idx_products_favorite ON products(user_id, is_favorite);
-    CREATE INDEX IF NOT EXISTS idx_workspaces_user ON workspaces(user_id);
-    CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
-    CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
-  `);
-
-  // Insert default workspace if not exists
-  const defaultWorkspace = db.prepare('SELECT COUNT(*) as count FROM workspaces').get();
-  if (defaultWorkspace.count === 0) {
-    db.prepare('INSERT INTO workspaces (name) VALUES (?)').run('My Collection');
+    await initDb();
+  } catch (err) {
+    console.error('Failed to initialize database schema:', err.message);
   }
 }
 
@@ -216,15 +99,15 @@ app.use(cors({
 }));
 app.use(express.json());
 
-const requireAuth = (req, res, next) => {
+const requireAuth = async (req, res, next) => {
   if (!ENABLE_DB_CACHE) return next();
   const token = req.headers.authorization;
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const session = db.prepare(`
+    const session = await db.get(`
       SELECT user_id, expires_at FROM sessions 
       WHERE token = ? AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
-    `).get(token);
+    `, [token]);
 
     if (!session) return res.status(401).json({ error: 'Session expired' });
     req.user = { id: session.user_id };
@@ -248,19 +131,19 @@ app.post('/api/register', async (req, res) => {
     const normalizedUsername = username.toLowerCase().trim();
 
     // Check for existing user case-insensitively
-    const existing = db.prepare('SELECT id FROM users WHERE lower(username) = ?').get(normalizedUsername);
+    const existing = await db.get('SELECT id FROM users WHERE lower(username) = ?', [normalizedUsername]);
     if (existing) return res.status(400).json({ error: 'Username taken' });
 
     const { salt, hash } = await hashPassword(password);
-    const result = db.prepare('INSERT INTO users (username, password, salt) VALUES (?, ?, ?)').run(normalizedUsername, hash, salt);
+    const result = await db.run('INSERT INTO users (username, password, salt) VALUES (?, ?, ?)', [normalizedUsername, hash, salt]);
     const userId = result.lastInsertRowid;
 
-    db.prepare('INSERT INTO workspaces (name, user_id) VALUES (?, ?)').run('My Collection', userId);
+    await db.run('INSERT INTO workspaces (name, user_id) VALUES (?, ?)', ['My Collection', userId]);
     
     // 32-byte cryptographically secure session token with 30-day expiration
     const token = crypto.randomBytes(32).toString('hex');
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-    db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expiresAt);
+    await db.run('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)', [token, userId, expiresAt]);
 
     res.json({ token, username: normalizedUsername, userId });
   } catch (err) {
@@ -278,7 +161,7 @@ app.post('/api/login', async (req, res) => {
 
     // Case insensitive lookup
     const normalizedUsername = username.toLowerCase().trim();
-    const user = db.prepare('SELECT * FROM users WHERE lower(username) = ?').get(normalizedUsername);
+    const user = await db.get('SELECT * FROM users WHERE lower(username) = ?', [normalizedUsername]);
 
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
@@ -289,7 +172,7 @@ app.post('/api/login', async (req, res) => {
     if (!user.salt) {
       try {
         const upgraded = await hashPassword(password);
-        db.prepare('UPDATE users SET password = ?, salt = ? WHERE id = ?').run(upgraded.hash, upgraded.salt, user.id);
+        await db.run('UPDATE users SET password = ?, salt = ? WHERE id = ?', [upgraded.hash, upgraded.salt, user.id]);
       } catch (upgradeErr) {
         console.error('Password auto-upgrade notice:', upgradeErr.message);
       }
@@ -298,7 +181,7 @@ app.post('/api/login', async (req, res) => {
     // Generate 32-byte session token with 30-day sliding expiry
     const token = crypto.randomBytes(32).toString('hex');
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-    db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, user.id, expiresAt);
+    await db.run('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)', [token, user.id, expiresAt]);
 
     res.json({ token, username: user.username, userId: user.id });
   } catch (err) {
@@ -307,15 +190,179 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-app.get('/api/me', requireAuth, (req, res) => {
-  const user = db.prepare('SELECT id, username FROM users WHERE id = ?').get(req.user.id);
+app.get('/api/me', requireAuth, async (req, res) => {
+  const user = await db.get('SELECT id, username, email, avatar FROM users WHERE id = ?', [req.user.id]);
   res.json(user);
 });
 
-app.post('/api/logout', requireAuth, (req, res) => {
+app.post('/api/logout', requireAuth, async (req, res) => {
   const token = req.headers.authorization;
-  db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+  await db.run('DELETE FROM sessions WHERE token = ?', [token]);
   res.json({ success: true });
+});
+
+// Social Login: Supported Providers status
+app.get('/api/auth/providers', (req, res) => {
+  res.json({
+    google: {
+      enabled: Boolean(process.env.GOOGLE_CLIENT_ID),
+      clientId: process.env.GOOGLE_CLIENT_ID || null
+    },
+    github: {
+      enabled: Boolean(process.env.GITHUB_CLIENT_ID),
+      clientId: process.env.GITHUB_CLIENT_ID || null
+    }
+  });
+});
+
+// Social Login: Google Token Verification & Sign-In
+app.post('/api/auth/google', async (req, res) => {
+  if (!ENABLE_DB_CACHE) return res.status(501).json({ error: 'DB not enabled' });
+  try {
+    const { credential, accessToken } = req.body;
+    if (!credential && !accessToken) {
+      return res.status(400).json({ error: 'Missing Google credential or access token' });
+    }
+
+    let googleProfile = null;
+
+    if (credential) {
+      const verifyRes = await axios.get(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`, { timeout: 6000 });
+      googleProfile = verifyRes.data;
+    } else if (accessToken) {
+      const userRes = await axios.get('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        timeout: 6000
+      });
+      googleProfile = userRes.data;
+    }
+
+    if (!googleProfile || (!googleProfile.sub && !googleProfile.id)) {
+      return res.status(401).json({ error: 'Invalid Google token' });
+    }
+
+    const googleId = googleProfile.sub || googleProfile.id;
+    const email = (googleProfile.email || '').toLowerCase().trim();
+    const avatar = googleProfile.picture || '';
+
+    let user = await db.get('SELECT * FROM users WHERE google_id = ? OR (email != "" AND lower(email) = ?)', [googleId, email]);
+
+    if (!user) {
+      const baseName = (email ? email.split('@')[0] : (googleProfile.name || 'user')).replace(/[^a-zA-Z0-9_]/g, '').toLowerCase().slice(0, 15);
+      const existingUser = await db.get('SELECT id FROM users WHERE lower(username) = ?', [baseName]);
+      const username = existingUser ? `${baseName}_${Math.floor(100 + Math.random() * 900)}` : baseName;
+
+      const result = await db.run(
+        'INSERT INTO users (username, password, salt, email, google_id, avatar) VALUES (?, "", "", ?, ?, ?)',
+        [username, email, googleId, avatar]
+      );
+      const userId = result.lastInsertRowid;
+      await db.run('INSERT INTO workspaces (name, user_id) VALUES (?, ?)', ['My Collection', userId]);
+      user = { id: userId, username };
+    } else if (!user.google_id) {
+      await db.run('UPDATE users SET google_id = ?, avatar = COALESCE(NULLIF(avatar, ""), ?) WHERE id = ?', [googleId, avatar, user.id]);
+    }
+
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    await db.run('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)', [token, user.id, expiresAt]);
+
+    res.json({ token, username: user.username, userId: user.id });
+  } catch (err) {
+    console.error('Google Auth Error:', err.response?.data || err.message);
+    res.status(500).json({ error: 'Google authentication failed' });
+  }
+});
+
+// Social Login: GitHub Redirect
+app.get('/api/auth/github', (req, res) => {
+  const clientId = process.env.GITHUB_CLIENT_ID;
+  if (!clientId) {
+    return res.status(400).send('GitHub OAuth is not configured. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET.');
+  }
+  const redirectUri = `${req.protocol}://${req.get('host')}/api/auth/github/callback`;
+  const url = `https://github.com/login/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=user:email`;
+  res.redirect(url);
+});
+
+// Social Login: GitHub Callback
+app.get('/api/auth/github/callback', async (req, res) => {
+  const { code } = req.query;
+  const clientId = process.env.GITHUB_CLIENT_ID;
+  const clientSecret = process.env.GITHUB_CLIENT_SECRET;
+
+  if (!code || !clientId || !clientSecret) {
+    return res.status(400).send('Missing GitHub authorization code or client secret');
+  }
+
+  try {
+    const tokenRes = await axios.post('https://github.com/login/oauth/access_token', {
+      client_id: clientId,
+      client_secret: clientSecret,
+      code
+    }, {
+      headers: { Accept: 'application/json' },
+      timeout: 8000
+    });
+
+    const accessToken = tokenRes.data.access_token;
+    if (!accessToken) throw new Error('Failed to obtain GitHub access token');
+
+    const userRes = await axios.get('https://api.github.com/user', {
+      headers: { Authorization: `Bearer ${accessToken}`, 'User-Agent': 'ShopDeck-App' },
+      timeout: 8000
+    });
+
+    const ghProfile = userRes.data;
+    const githubId = String(ghProfile.id);
+    let email = ghProfile.email || '';
+    const avatar = ghProfile.avatar_url || '';
+
+    if (!email) {
+      try {
+        const emailsRes = await axios.get('https://api.github.com/user/emails', {
+          headers: { Authorization: `Bearer ${accessToken}`, 'User-Agent': 'ShopDeck-App' },
+          timeout: 6000
+        });
+        const primary = emailsRes.data.find(e => e.primary && e.verified) || emailsRes.data[0];
+        if (primary) email = primary.email;
+      } catch (_) {}
+    }
+
+    let user = await db.get('SELECT * FROM users WHERE github_id = ? OR (email != "" AND lower(email) = ?)', [githubId, email.toLowerCase()]);
+
+    if (!user) {
+      const baseName = (ghProfile.login || 'gh_user').replace(/[^a-zA-Z0-9_]/g, '').toLowerCase().slice(0, 15);
+      const existingUser = await db.get('SELECT id FROM users WHERE lower(username) = ?', [baseName]);
+      const username = existingUser ? `${baseName}_${Math.floor(100 + Math.random() * 900)}` : baseName;
+
+      const result = await db.run(
+        'INSERT INTO users (username, password, salt, email, github_id, avatar) VALUES (?, "", "", ?, ?, ?)',
+        [username, email, githubId, avatar]
+      );
+      const userId = result.lastInsertRowid;
+      await db.run('INSERT INTO workspaces (name, user_id) VALUES (?, ?)', ['My Collection', userId]);
+      user = { id: userId, username };
+    } else {
+      if (!user.github_id) {
+        await db.run('UPDATE users SET github_id = ?, avatar = COALESCE(NULLIF(avatar, ""), ?) WHERE id = ?', [githubId, avatar, user.id]);
+      }
+    }
+
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    await db.run('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)', [token, user.id, expiresAt]);
+
+    const frontendBase = process.env.CLIENT_URL || req.headers.referer || '/';
+    const redirectUrl = new URL(frontendBase, `${req.protocol}://${req.get('host')}`);
+    redirectUrl.searchParams.set('token', token);
+    redirectUrl.searchParams.set('username', user.username);
+
+    res.redirect(redirectUrl.toString());
+  } catch (err) {
+    console.error('GitHub Auth Callback Error:', err.response?.data || err.message);
+    res.status(500).send('GitHub authentication failed: ' + err.message);
+  }
 });
 
 // Helper: MD5 Hash
@@ -531,7 +578,7 @@ const extractSize = ($) => {
 };
 
 // GET: Fetch all cached products (Strict multi-tenant isolation via user_id)
-app.get('/api/products', requireAuth, (req, res) => {
+app.get('/api/products', requireAuth, async (req, res) => {
   if (!ENABLE_DB_CACHE) return res.json([]);
   try {
     const { workspace_id, favorites } = req.query;
@@ -554,7 +601,7 @@ app.get('/api/products', requireAuth, (req, res) => {
 
     query += ' ORDER BY p.updated_at DESC';
 
-    const products = db.prepare(query).all(...params);
+    const products = await db.all(query, params);
     res.json(products);
   } catch (err) {
     console.error(err);
@@ -563,7 +610,7 @@ app.get('/api/products', requireAuth, (req, res) => {
 });
 
 // DELETE: Remove a product (Fix BOLA/IDOR: strictly scoped to req.user.id and optional workspace)
-app.delete('/api/products/:id', requireAuth, (req, res) => {
+app.delete('/api/products/:id', requireAuth, async (req, res) => {
   if (!ENABLE_DB_CACHE) return res.status(501).json({ error: 'DB not enabled' });
   try {
     const { id } = req.params;
@@ -572,15 +619,15 @@ app.delete('/api/products/:id', requireAuth, (req, res) => {
 
     let result;
     if (workspace_id && workspace_id !== 'all') {
-      result = db.prepare(`
+      result = await db.run(`
         DELETE FROM products 
         WHERE id = ? AND workspace_id = ? AND user_id = ?
-      `).run(id, workspace_id, userId);
+      `, [id, workspace_id, userId]);
     } else {
-      result = db.prepare(`
+      result = await db.run(`
         DELETE FROM products 
         WHERE id = ? AND user_id = ?
-      `).run(id, userId);
+      `, [id, userId]);
     }
 
     if (result.changes === 0) {
@@ -595,10 +642,10 @@ app.delete('/api/products/:id', requireAuth, (req, res) => {
 });
 
 // GET: Fetch all workspaces
-app.get('/api/workspaces', requireAuth, (req, res) => {
+app.get('/api/workspaces', requireAuth, async (req, res) => {
   if (!ENABLE_DB_CACHE) return res.json([]);
   try {
-    const workspaces = db.prepare('SELECT * FROM workspaces WHERE user_id = ? ORDER BY created_at ASC').all(req.user.id);
+    const workspaces = await db.all('SELECT * FROM workspaces WHERE user_id = ? ORDER BY created_at ASC', [req.user.id]);
     res.json(workspaces);
   } catch (err) {
     console.error(err);
@@ -607,7 +654,7 @@ app.get('/api/workspaces', requireAuth, (req, res) => {
 });
 
 // POST: Create a new workspace
-app.post('/api/workspaces', requireAuth, (req, res) => {
+app.post('/api/workspaces', requireAuth, async (req, res) => {
   if (!ENABLE_DB_CACHE) return res.status(501).json({ error: 'DB not enabled' });
   try {
     const { name } = req.body;
@@ -615,8 +662,8 @@ app.post('/api/workspaces', requireAuth, (req, res) => {
       return res.status(400).json({ error: 'Workspace name is required' });
     }
 
-    const result = db.prepare('INSERT INTO workspaces (name, user_id) VALUES (?, ?)').run(name.trim(), req.user.id);
-    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(result.lastInsertRowid);
+    const result = await db.run('INSERT INTO workspaces (name, user_id) VALUES (?, ?)', [name.trim(), req.user.id]);
+    const workspace = await db.get('SELECT * FROM workspaces WHERE id = ?', [result.lastInsertRowid]);
     res.json(workspace);
   } catch (err) {
     console.error(err);
@@ -625,14 +672,14 @@ app.post('/api/workspaces', requireAuth, (req, res) => {
 });
 
 // DELETE: Remove a workspace (Fix BOLA: scoped strictly to user_id)
-app.delete('/api/workspaces/:id', requireAuth, (req, res) => {
+app.delete('/api/workspaces/:id', requireAuth, async (req, res) => {
   if (!ENABLE_DB_CACHE) return res.status(501).json({ error: 'DB not enabled' });
   try {
     const { id } = req.params;
     const userId = req.user.id;
 
     // Prevent deletion of the last workspace
-    const workspaces = db.prepare('SELECT id FROM workspaces WHERE user_id = ?').all(userId);
+    const workspaces = await db.all('SELECT id FROM workspaces WHERE user_id = ?', [userId]);
     const workspace = workspaces.find(w => w.id == id);
     if (!workspace) return res.status(404).json({ error: 'Workspace not found' });
 
@@ -641,7 +688,7 @@ app.delete('/api/workspaces/:id', requireAuth, (req, res) => {
     }
 
     // Scoped strictly to user_id to prevent cross-tenant deletion
-    db.prepare('DELETE FROM workspaces WHERE id = ? AND user_id = ?').run(id, userId);
+    await db.run('DELETE FROM workspaces WHERE id = ? AND user_id = ?', [id, userId]);
     res.json({ success: true, id });
   } catch (err) {
     console.error(err);
@@ -650,7 +697,7 @@ app.delete('/api/workspaces/:id', requireAuth, (req, res) => {
 });
 
 // PATCH: Toggle favorite status (Fix BOLA: scoped strictly to user_id)
-app.patch('/api/products/:id/favorite', requireAuth, (req, res) => {
+app.patch('/api/products/:id/favorite', requireAuth, async (req, res) => {
   if (!ENABLE_DB_CACHE) return res.status(501).json({ error: 'DB not enabled' });
   try {
     const { id } = req.params;
@@ -659,15 +706,15 @@ app.patch('/api/products/:id/favorite', requireAuth, (req, res) => {
 
     let result;
     if (workspace_id && workspace_id !== 'all') {
-      result = db.prepare(`
+      result = await db.run(`
         UPDATE products SET is_favorite = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ? AND workspace_id = ? AND user_id = ?
-      `).run(is_favorite ? 1 : 0, id, workspace_id, userId);
+      `, [is_favorite ? 1 : 0, id, workspace_id, userId]);
     } else {
-      result = db.prepare(`
+      result = await db.run(`
         UPDATE products SET is_favorite = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ? AND user_id = ?
-      `).run(is_favorite ? 1 : 0, id, userId);
+      `, [is_favorite ? 1 : 0, id, userId]);
     }
 
     if (result.changes === 0) {
@@ -692,11 +739,11 @@ app.post('/api/scrape', requireAuth, async (req, res) => {
 
   // Validate workspace
   if (targetWorkspaceId) {
-    const ws = db.prepare('SELECT id FROM workspaces WHERE id = ? AND user_id = ?').get(targetWorkspaceId, userId);
+    const ws = await db.get('SELECT id FROM workspaces WHERE id = ? AND user_id = ?', [targetWorkspaceId, userId]);
     if (!ws) return res.status(403).json({ error: 'Invalid workspace' });
   } else {
     // Default to first available
-    const ws = db.prepare('SELECT id FROM workspaces WHERE user_id = ? ORDER BY created_at ASC LIMIT 1').get(userId);
+    const ws = await db.get('SELECT id FROM workspaces WHERE user_id = ? ORDER BY created_at ASC LIMIT 1', [userId]);
     if (!ws) return res.status(400).json({ error: 'No workspace found' });
     targetWorkspaceId = ws.id;
   }
@@ -727,7 +774,7 @@ app.post('/api/scrape', requireAuth, async (req, res) => {
 
     // 1. Check DB if enabled
     if (ENABLE_DB_CACHE) {
-      const cached = db.prepare('SELECT * FROM products WHERE id = ? AND workspace_id = ?').get(id, workspaceId);
+      const cached = await db.get('SELECT * FROM products WHERE id = ? AND workspace_id = ?', [id, workspaceId]);
       if (cached) {
         console.log(`[CACHE HIT] ${url}`);
         results.push({
@@ -843,10 +890,20 @@ app.post('/api/scrape', requireAuth, async (req, res) => {
       // 3. Store in DB if enabled
       if (ENABLE_DB_CACHE) {
         try {
-          db.prepare(`
+          await db.run(`
                 INSERT OR REPLACE INTO products (id, workspace_id, user_id, url, title, image, price, size, is_favorite)
-                VALUES (@id, @workspace_id, @user_id, @url, @title, @image, @price, @size, @is_favorite)
-            `).run(productData);
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `, [
+            productData.id,
+            productData.workspace_id,
+            productData.user_id,
+            productData.url,
+            productData.title,
+            productData.image,
+            productData.price,
+            productData.size,
+            productData.is_favorite
+          ]);
         } catch (dbErr) {
           console.error('DB Write Error:', dbErr);
         }

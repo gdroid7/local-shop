@@ -12,6 +12,7 @@
   "author": "gdroid7",
   "license": "MIT",
   "dependencies": {
+    "@libsql/client": "^0.18.0",
     "axios": "^1.13.4",
     "better-sqlite3": "^12.6.2",
     "cheerio": "^1.2.0",
