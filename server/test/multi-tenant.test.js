@@ -137,10 +137,10 @@ try {
   const metaCheck = await fetch(`http://localhost:${TEST_PORT}/api/proxy-image?url=http://169.254.169.254/latest/meta-data/`);
   assert(metaCheck.status === 403, 'Image proxy blocks cloud metadata IP attempt (Returns 403)');
 
-  // Test 7: Social Login Providers Status
+  // Test 7: Social Login Providers Status (Google Only)
   const provRes = await api('/api/auth/providers');
   assert(provRes.status === 200, 'Social auth providers endpoint accessible');
-  assert('google' in provRes.data && 'github' in provRes.data, 'Social auth status returns Google & GitHub configurations');
+  assert('google' in provRes.data, 'Social auth status returns Google configuration');
 
 } catch (err) {
   console.error('Test execution error:', err);

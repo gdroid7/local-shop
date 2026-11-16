@@ -201,21 +201,109 @@ app.post('/api/logout', requireAuth, async (req, res) => {
   res.json({ success: true });
 });
 
-// Social Login: Supported Providers status
+// Social Login: Supported Providers status (Google Only)
 app.get('/api/auth/providers', (req, res) => {
   res.json({
     google: {
       enabled: Boolean(process.env.GOOGLE_CLIENT_ID),
       clientId: process.env.GOOGLE_CLIENT_ID || null
-    },
-    github: {
-      enabled: Boolean(process.env.GITHUB_CLIENT_ID),
-      clientId: process.env.GITHUB_CLIENT_ID || null
     }
   });
 });
 
-// Social Login: Google Token Verification & Sign-In
+// Social Login: Google Redirect (OAuth 2.0 Code Flow)
+app.get('/api/auth/google', (req, res) => {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  if (!clientId) {
+    return res.status(400).send('Google OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.');
+  }
+  const redirectUri = `${req.protocol}://${req.get('host')}/api/auth/google/callback`;
+  const url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=openid%20email%20profile&access_type=online&prompt=select_account`;
+  res.redirect(url);
+});
+
+// Social Login: Google Callback
+app.get('/api/auth/google/callback', async (req, res) => {
+  const { code } = req.query;
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+
+  if (!code || !clientId || !clientSecret) {
+    return res.status(400).send('Missing Google authorization code or client secret');
+  }
+
+  try {
+    const redirectUri = `${req.protocol}://${req.get('host')}/api/auth/google/callback`;
+    const tokenRes = await axios.post('https://oauth2.googleapis.com/token', {
+      client_id: clientId,
+      client_secret: clientSecret,
+      code,
+      grant_type: 'authorization_code',
+      redirect_uri: redirectUri
+    }, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 8000
+    });
+
+    const { id_token, access_token } = tokenRes.data;
+    let googleProfile = null;
+
+    if (id_token) {
+      const verifyRes = await axios.get(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(id_token)}`, { timeout: 6000 });
+      googleProfile = verifyRes.data;
+    } else if (access_token) {
+      const userRes = await axios.get('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: { Authorization: `Bearer ${access_token}` },
+        timeout: 6000
+      });
+      googleProfile = userRes.data;
+    }
+
+    if (!googleProfile || (!googleProfile.sub && !googleProfile.id)) {
+      return res.status(401).send('Failed to obtain Google user profile');
+    }
+
+    const googleId = googleProfile.sub || googleProfile.id;
+    const email = (googleProfile.email || '').toLowerCase().trim();
+    const avatar = googleProfile.picture || '';
+
+    let user = await db.get('SELECT * FROM users WHERE google_id = ? OR (email != "" AND lower(email) = ?)', [googleId, email]);
+
+    if (!user) {
+      const baseName = (email ? email.split('@')[0] : (googleProfile.name || 'user')).replace(/[^a-zA-Z0-9_]/g, '').toLowerCase().slice(0, 15);
+      const existingUser = await db.get('SELECT id FROM users WHERE lower(username) = ?', [baseName]);
+      const username = existingUser ? `${baseName}_${Math.floor(100 + Math.random() * 900)}` : baseName;
+
+      const result = await db.run(
+        'INSERT INTO users (username, password, salt, email, google_id, avatar) VALUES (?, "", "", ?, ?, ?)',
+        [username, email, googleId, avatar]
+      );
+      const userId = result.lastInsertRowid;
+      await db.run('INSERT INTO workspaces (name, user_id) VALUES (?, ?)', ['My Collection', userId]);
+      user = { id: userId, username };
+    } else {
+      if (!user.google_id) {
+        await db.run('UPDATE users SET google_id = ?, avatar = COALESCE(NULLIF(avatar, ""), ?) WHERE id = ?', [googleId, avatar, user.id]);
+      }
+    }
+
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    await db.run('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)', [token, user.id, expiresAt]);
+
+    const frontendBase = process.env.CLIENT_URL || process.env.FRONTEND_URL || 'https://shop-deck.netlify.app';
+    const redirectUrl = new URL(frontendBase, `${req.protocol}://${req.get('host')}`);
+    redirectUrl.searchParams.set('token', token);
+    redirectUrl.searchParams.set('username', user.username);
+
+    res.redirect(redirectUrl.toString());
+  } catch (err) {
+    console.error('Google OAuth Callback Error:', err.response?.data || err.message);
+    res.status(500).send('Google authentication failed: ' + (err.response?.data?.error_description || err.message));
+  }
+});
+
+// Social Login: Google Token Verification & Sign-In (Direct API / Token endpoint)
 app.post('/api/auth/google', async (req, res) => {
   if (!ENABLE_DB_CACHE) return res.status(501).json({ error: 'DB not enabled' });
   try {
@@ -271,97 +359,6 @@ app.post('/api/auth/google', async (req, res) => {
   } catch (err) {
     console.error('Google Auth Error:', err.response?.data || err.message);
     res.status(500).json({ error: 'Google authentication failed' });
-  }
-});
-
-// Social Login: GitHub Redirect
-app.get('/api/auth/github', (req, res) => {
-  const clientId = process.env.GITHUB_CLIENT_ID;
-  if (!clientId) {
-    return res.status(400).send('GitHub OAuth is not configured. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET.');
-  }
-  const redirectUri = `${req.protocol}://${req.get('host')}/api/auth/github/callback`;
-  const url = `https://github.com/login/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=user:email`;
-  res.redirect(url);
-});
-
-// Social Login: GitHub Callback
-app.get('/api/auth/github/callback', async (req, res) => {
-  const { code } = req.query;
-  const clientId = process.env.GITHUB_CLIENT_ID;
-  const clientSecret = process.env.GITHUB_CLIENT_SECRET;
-
-  if (!code || !clientId || !clientSecret) {
-    return res.status(400).send('Missing GitHub authorization code or client secret');
-  }
-
-  try {
-    const tokenRes = await axios.post('https://github.com/login/oauth/access_token', {
-      client_id: clientId,
-      client_secret: clientSecret,
-      code
-    }, {
-      headers: { Accept: 'application/json' },
-      timeout: 8000
-    });
-
-    const accessToken = tokenRes.data.access_token;
-    if (!accessToken) throw new Error('Failed to obtain GitHub access token');
-
-    const userRes = await axios.get('https://api.github.com/user', {
-      headers: { Authorization: `Bearer ${accessToken}`, 'User-Agent': 'ShopDeck-App' },
-      timeout: 8000
-    });
-
-    const ghProfile = userRes.data;
-    const githubId = String(ghProfile.id);
-    let email = ghProfile.email || '';
-    const avatar = ghProfile.avatar_url || '';
-
-    if (!email) {
-      try {
-        const emailsRes = await axios.get('https://api.github.com/user/emails', {
-          headers: { Authorization: `Bearer ${accessToken}`, 'User-Agent': 'ShopDeck-App' },
-          timeout: 6000
-        });
-        const primary = emailsRes.data.find(e => e.primary && e.verified) || emailsRes.data[0];
-        if (primary) email = primary.email;
-      } catch (_) {}
-    }
-
-    let user = await db.get('SELECT * FROM users WHERE github_id = ? OR (email != "" AND lower(email) = ?)', [githubId, email.toLowerCase()]);
-
-    if (!user) {
-      const baseName = (ghProfile.login || 'gh_user').replace(/[^a-zA-Z0-9_]/g, '').toLowerCase().slice(0, 15);
-      const existingUser = await db.get('SELECT id FROM users WHERE lower(username) = ?', [baseName]);
-      const username = existingUser ? `${baseName}_${Math.floor(100 + Math.random() * 900)}` : baseName;
-
-      const result = await db.run(
-        'INSERT INTO users (username, password, salt, email, github_id, avatar) VALUES (?, "", "", ?, ?, ?)',
-        [username, email, githubId, avatar]
-      );
-      const userId = result.lastInsertRowid;
-      await db.run('INSERT INTO workspaces (name, user_id) VALUES (?, ?)', ['My Collection', userId]);
-      user = { id: userId, username };
-    } else {
-      if (!user.github_id) {
-        await db.run('UPDATE users SET github_id = ?, avatar = COALESCE(NULLIF(avatar, ""), ?) WHERE id = ?', [githubId, avatar, user.id]);
-      }
-    }
-
-    const token = crypto.randomBytes(32).toString('hex');
-    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-    await db.run('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)', [token, user.id, expiresAt]);
-
-    const frontendBase = process.env.CLIENT_URL || process.env.FRONTEND_URL || 'https://shop-deck.netlify.app';
-    const redirectUrl = new URL(frontendBase, `${req.protocol}://${req.get('host')}`);
-    redirectUrl.searchParams.set('token', token);
-    redirectUrl.searchParams.set('username', user.username);
-
-    res.redirect(redirectUrl.toString());
-  } catch (err) {
-    console.error('GitHub Auth Callback Error:', err.response?.data || err.message);
-    res.status(500).send('GitHub authentication failed: ' + err.message);
   }
 });
 
