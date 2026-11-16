@@ -1,0 +1,36 @@
+name: CI & Deployment Pre-Flight
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  verify-and-test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [20.x, 22.x]
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install Dependencies
+        run: npm run setup
+
+      - name: Build React Client (Vite)
+        run: npm run build
+
+      - name: Run Multi-Tenant & Security Tests
+        run: npm test
+
+      - name: Run Pre-Flight Deployment Check
+        run: npm run deploy:check

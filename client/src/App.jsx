@@ -2,6 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import ProductCard from './components/ProductCard';
 import ConfirmDialog from './components/ConfirmDialog';
 
+const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
+const apiUrl = (path) => (path.startsWith('/') ? `${API_BASE}${path}` : path);
+
 function App() {
   const [token, setToken] = useState(localStorage.getItem('token'));
   const [user, setUser] = useState(null);
@@ -32,13 +35,14 @@ function App() {
   };
 
   const fetchWithAuth = async (url, options = {}) => {
-    if (!token) return window.fetch(url, options);
+    const targetUrl = apiUrl(url);
+    if (!token) return window.fetch(targetUrl, options);
     const headers = {
       'Content-Type': 'application/json',
       ...options.headers,
       Authorization: token
     };
-    const res = await window.fetch(url, { ...options, headers });
+    const res = await window.fetch(targetUrl, { ...options, headers });
     if (res.status === 401) {
       logout();
       throw new Error('Unauthorized');
@@ -48,7 +52,7 @@ function App() {
 
   useEffect(() => {
     if (token && !user) {
-      window.fetch('/api/me', { headers: { Authorization: token } })
+      window.fetch(apiUrl('/api/me'), { headers: { Authorization: token } })
         .then(res => { if (res.ok) return res.json(); throw new Error(); })
         .then(setUser)
         .catch(logout);
@@ -1199,7 +1203,7 @@ function LoginPage({ onLogin }) {
     e.preventDefault();
     setError('');
     setLoading(true);
-    const endpoint = isRegister ? '/api/register' : '/api/login';
+    const endpoint = apiUrl(isRegister ? '/api/register' : '/api/login');
 
     try {
       const res = await window.fetch(endpoint, {

@@ -6,6 +6,7 @@ import * as cheerio from 'cheerio';
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -18,47 +19,71 @@ const PORT = process.env.PORT || 3000;
 const ENABLE_DB_CACHE = process.env.USE_DATABASE !== 'false';
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'products.db');
 
-// Initialise Database
+// Initialise Database with high-efficiency PRAGMAs (minimal RAM & WAL mode)
 let db;
 if (ENABLE_DB_CACHE) {
   db = new Database(DB_PATH);
   db.pragma('foreign_keys = ON');
+  db.pragma('journal_mode = WAL');
+  db.pragma('synchronous = NORMAL');
+  db.pragma('cache_size = -2000'); // Frugal memory cap: ~2MB RAM cache
+  db.pragma('temp_store = MEMORY');
 
-
-  // Create users table
+  // Create users table with salt support
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT UNIQUE NOT NULL,
       password TEXT NOT NULL,
+      salt TEXT DEFAULT '',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
 
-  // Create sessions table
+  // Migration: Add salt to users if missing
+  const userCols = db.prepare('PRAGMA table_info(users)').all();
+  if (!userCols.find(c => c.name === 'salt')) {
+    db.exec('ALTER TABLE users ADD COLUMN salt TEXT DEFAULT ""');
+  }
+
+  // Create sessions table with expiration
   db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
       token TEXT PRIMARY KEY,
       user_id INTEGER NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      expires_at DATETIME DEFAULT (datetime('now', '+30 days')),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )
   `);
 
-  // Create workspaces table
-  db.exec(`
-        CREATE TABLE IF NOT EXISTS workspaces (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER DEFAULT 1,
-            name TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )
-    `);
+  // Migration: Add expires_at to sessions if missing
+  const sessionCols = db.prepare('PRAGMA table_info(sessions)').all();
+  if (!sessionCols.find(c => c.name === 'expires_at')) {
+    db.exec('ALTER TABLE sessions ADD COLUMN expires_at DATETIME DEFAULT (datetime("now", "+30 days"))');
+  }
 
-  // Migration: Add user_id if missing
-  const cols = db.prepare('PRAGMA table_info(workspaces)').all();
-  if (!cols.find(c => c.name === 'user_id')) {
+  // Auto-clean expired sessions on startup
+  try {
+    db.exec('DELETE FROM sessions WHERE expires_at < CURRENT_TIMESTAMP');
+  } catch (e) {
+    console.error('Session cleanup error:', e.message);
+  }
+
+  // Create workspaces table (Tenant-isolated per user_id)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS workspaces (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER DEFAULT 1,
+      name TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+
+  // Migration: Add user_id to workspaces if missing
+  const wsCols = db.prepare('PRAGMA table_info(workspaces)').all();
+  if (!wsCols.find(c => c.name === 'user_id')) {
     db.exec('ALTER TABLE workspaces ADD COLUMN user_id INTEGER DEFAULT 1');
   }
 
@@ -69,22 +94,49 @@ if (ENABLE_DB_CACHE) {
     db.prepare('INSERT INTO users (id, username, password) VALUES (1, ?, ?)').run('admin', hash);
   }
 
-  // We'll use 'id' (hash) as primary key to ensure idempotency
+  // Create products table with tenant isolation (user_id + workspace_id)
   db.exec(`
-        CREATE TABLE IF NOT EXISTS products (
-            id TEXT,
-            workspace_id INTEGER DEFAULT 1,
-            url TEXT,
-            title TEXT,
-            image TEXT,
-            price TEXT,
-            size TEXT,
-            is_favorite INTEGER DEFAULT 0,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (id, workspace_id),
-            FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
-        )
-    `);
+    CREATE TABLE IF NOT EXISTS products (
+      id TEXT,
+      workspace_id INTEGER DEFAULT 1,
+      user_id INTEGER DEFAULT 1,
+      url TEXT,
+      title TEXT,
+      image TEXT,
+      price TEXT,
+      size TEXT,
+      is_favorite INTEGER DEFAULT 0,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id, workspace_id),
+      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+
+  // Migration: Add user_id to products if missing and backfill from workspace
+  const productCols = db.prepare('PRAGMA table_info(products)').all();
+  if (!productCols.find(c => c.name === 'user_id')) {
+    db.exec('ALTER TABLE products ADD COLUMN user_id INTEGER DEFAULT 1');
+    try {
+      db.exec(`
+        UPDATE products 
+        SET user_id = (SELECT user_id FROM workspaces WHERE workspaces.id = products.workspace_id)
+        WHERE user_id IS NULL OR user_id = 1
+      `);
+    } catch (e) {
+      console.error('Backfill products user_id error:', e.message);
+    }
+  }
+
+  // Tenant-isolation indexes for rapid querying and zero scan overhead
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_products_workspace ON products(workspace_id);
+    CREATE INDEX IF NOT EXISTS idx_products_user ON products(user_id);
+    CREATE INDEX IF NOT EXISTS idx_products_favorite ON products(user_id, is_favorite);
+    CREATE INDEX IF NOT EXISTS idx_workspaces_user ON workspaces(user_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+  `);
 
   // Insert default workspace if not exists
   const defaultWorkspace = db.prepare('SELECT COUNT(*) as count FROM workspaces').get();
@@ -93,12 +145,47 @@ if (ENABLE_DB_CACHE) {
   }
 }
 
+// Built-in scrypt Password Hashing (Zero dependencies, memory-hard security)
+const hashPassword = (password) => {
+  return new Promise((resolve, reject) => {
+    const salt = crypto.randomBytes(16).toString('hex');
+    crypto.scrypt(password, salt, 64, (err, derivedKey) => {
+      if (err) return reject(err);
+      resolve({ salt, hash: derivedKey.toString('hex') });
+    });
+  });
+};
+
+const verifyPassword = (password, salt, storedHash) => {
+  return new Promise((resolve, reject) => {
+    if (!salt) {
+      // Legacy SHA-256 fallback with timing-safe comparison
+      const legacyHash = crypto.createHash('sha256').update(password).digest('hex');
+      const legBuf = Buffer.from(legacyHash, 'utf8');
+      const storeBuf = Buffer.from(storedHash, 'utf8');
+      if (legBuf.length !== storeBuf.length) return resolve(false);
+      return resolve(crypto.timingSafeEqual(legBuf, storeBuf));
+    }
+    crypto.scrypt(password, salt, 64, (err, derivedKey) => {
+      if (err) return reject(err);
+      const keyBuffer = Buffer.from(derivedKey.toString('hex'), 'hex');
+      const hashBuffer = Buffer.from(storedHash, 'hex');
+      if (keyBuffer.length !== hashBuffer.length) return resolve(false);
+      resolve(crypto.timingSafeEqual(keyBuffer, hashBuffer));
+    });
+  });
+};
+
 // Enable trust proxy for ngrok/reverse proxy support
 app.set('trust proxy', 1);
 
-// CORS configuration - allow all origins for development (including ngrok)
+// CORS configuration - supports production whitelist via CORS_ORIGIN or permissive dev fallback
+const allowedOrigins = process.env.CORS_ORIGIN 
+  ? process.env.CORS_ORIGIN.split(',').map(s => s.trim()) 
+  : true;
+
 app.use(cors({
-  origin: true, // Allow all origins
+  origin: allowedOrigins,
   credentials: true
 }));
 app.use(express.json());
@@ -108,7 +195,11 @@ const requireAuth = (req, res, next) => {
   const token = req.headers.authorization;
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const session = db.prepare('SELECT user_id FROM sessions WHERE token = ?').get(token);
+    const session = db.prepare(`
+      SELECT user_id, expires_at FROM sessions 
+      WHERE token = ? AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+    `).get(token);
+
     if (!session) return res.status(401).json({ error: 'Session expired' });
     req.user = { id: session.user_id };
     next();
@@ -118,11 +209,14 @@ const requireAuth = (req, res, next) => {
   }
 };
 
-app.post('/api/register', (req, res) => {
+app.post('/api/register', async (req, res) => {
   if (!ENABLE_DB_CACHE) return res.status(501).json({ error: 'DB not enabled' });
   try {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: 'Missing fields' });
+    if (typeof password !== 'string' || password.length < 4) {
+      return res.status(400).json({ error: 'Password must be at least 4 characters' });
+    }
 
     // Case insensitive storage
     const normalizedUsername = username.toLowerCase().trim();
@@ -131,37 +225,54 @@ app.post('/api/register', (req, res) => {
     const existing = db.prepare('SELECT id FROM users WHERE lower(username) = ?').get(normalizedUsername);
     if (existing) return res.status(400).json({ error: 'Username taken' });
 
-    const hash = crypto.createHash('sha256').update(password).digest('hex');
-    const result = db.prepare('INSERT INTO users (username, password) VALUES (?, ?)').run(normalizedUsername, hash);
+    const { salt, hash } = await hashPassword(password);
+    const result = db.prepare('INSERT INTO users (username, password, salt) VALUES (?, ?, ?)').run(normalizedUsername, hash, salt);
     const userId = result.lastInsertRowid;
 
     db.prepare('INSERT INTO workspaces (name, user_id) VALUES (?, ?)').run('My Collection', userId);
-    const token = crypto.randomBytes(16).toString('hex');
-    db.prepare('INSERT INTO sessions (token, user_id) VALUES (?, ?)').run(token, userId);
+    
+    // 32-byte cryptographically secure session token with 30-day expiration
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expiresAt);
 
     res.json({ token, username: normalizedUsername, userId });
   } catch (err) {
-    if (err.message.includes('UNIQUE')) return res.status(400).json({ error: 'Username taken' });
+    if (err.message && err.message.includes('UNIQUE')) return res.status(400).json({ error: 'Username taken' });
+    console.error('Register failed:', err);
     res.status(500).json({ error: 'Register failed' });
   }
 });
 
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
   if (!ENABLE_DB_CACHE) return res.status(501).json({ error: 'DB not enabled' });
   try {
     const { username, password } = req.body;
+    if (!username || !password) return res.status(400).json({ error: 'Missing credentials' });
+
     // Case insensitive lookup
     const normalizedUsername = username.toLowerCase().trim();
-
-    const hash = crypto.createHash('sha256').update(password).digest('hex');
-
-    // Check using lower() for robustness
-    const user = db.prepare('SELECT * FROM users WHERE lower(username) = ? AND password = ?').get(normalizedUsername, hash);
+    const user = db.prepare('SELECT * FROM users WHERE lower(username) = ?').get(normalizedUsername);
 
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const token = crypto.randomBytes(16).toString('hex');
-    db.prepare('INSERT INTO sessions (token, user_id) VALUES (?, ?)').run(token, user.id);
+    const isValid = await verifyPassword(password, user.salt, user.password);
+    if (!isValid) return res.status(401).json({ error: 'Invalid credentials' });
+
+    // Seamless auto-upgrade of legacy sha256 to modern scrypt
+    if (!user.salt) {
+      try {
+        const upgraded = await hashPassword(password);
+        db.prepare('UPDATE users SET password = ?, salt = ? WHERE id = ?').run(upgraded.hash, upgraded.salt, user.id);
+      } catch (upgradeErr) {
+        console.error('Password auto-upgrade notice:', upgradeErr.message);
+      }
+    }
+
+    // Generate 32-byte session token with 30-day sliding expiry
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, user.id, expiresAt);
 
     res.json({ token, username: user.username, userId: user.id });
   } catch (err) {
@@ -393,7 +504,7 @@ const extractSize = ($) => {
   return 'Visit Site';
 };
 
-// GET: Fetch all cached products (with optional workspace filter and favorites filter)
+// GET: Fetch all cached products (Strict multi-tenant isolation via user_id)
 app.get('/api/products', requireAuth, (req, res) => {
   if (!ENABLE_DB_CACHE) return res.json([]);
   try {
@@ -402,12 +513,11 @@ app.get('/api/products', requireAuth, (req, res) => {
 
     let query = `
       SELECT p.* FROM products p
-      JOIN workspaces w ON p.workspace_id = w.id
-      WHERE w.user_id = ?
+      WHERE p.user_id = ?
     `;
     const params = [userId];
 
-    if (workspace_id) {
+    if (workspace_id && workspace_id !== 'all') {
       query += ' AND p.workspace_id = ?';
       params.push(workspace_id);
     }
@@ -426,23 +536,30 @@ app.get('/api/products', requireAuth, (req, res) => {
   }
 });
 
-// DELETE: Remove a product
+// DELETE: Remove a product (Fix BOLA/IDOR: strictly scoped to req.user.id and optional workspace)
 app.delete('/api/products/:id', requireAuth, (req, res) => {
   if (!ENABLE_DB_CACHE) return res.status(501).json({ error: 'DB not enabled' });
   try {
     const { id } = req.params;
+    const { workspace_id } = req.query;
     const userId = req.user.id;
 
-    // Ensure product belongs to a workspace owned by user
-    const product = db.prepare(`
-      SELECT p.id FROM products p
-      JOIN workspaces w ON p.workspace_id = w.id
-      WHERE p.id = ? AND w.user_id = ?
-    `).get(id, userId);
+    let result;
+    if (workspace_id && workspace_id !== 'all') {
+      result = db.prepare(`
+        DELETE FROM products 
+        WHERE id = ? AND workspace_id = ? AND user_id = ?
+      `).run(id, workspace_id, userId);
+    } else {
+      result = db.prepare(`
+        DELETE FROM products 
+        WHERE id = ? AND user_id = ?
+      `).run(id, userId);
+    }
 
-    if (!product) return res.status(404).json({ error: 'Product not found or access denied' });
-
-    db.prepare('DELETE FROM products WHERE id = ?').run(id);
+    if (result.changes === 0) {
+      return res.status(404).json({ error: 'Product not found or access denied' });
+    }
 
     res.json({ success: true, id });
   } catch (err) {
@@ -481,7 +598,7 @@ app.post('/api/workspaces', requireAuth, (req, res) => {
   }
 });
 
-// DELETE: Remove a workspace (and all its products)
+// DELETE: Remove a workspace (Fix BOLA: scoped strictly to user_id)
 app.delete('/api/workspaces/:id', requireAuth, (req, res) => {
   if (!ENABLE_DB_CACHE) return res.status(501).json({ error: 'DB not enabled' });
   try {
@@ -497,7 +614,8 @@ app.delete('/api/workspaces/:id', requireAuth, (req, res) => {
       return res.status(400).json({ error: 'Cannot delete the last workspace' });
     }
 
-    db.prepare('DELETE FROM workspaces WHERE id = ?').run(id);
+    // Scoped strictly to user_id to prevent cross-tenant deletion
+    db.prepare('DELETE FROM workspaces WHERE id = ? AND user_id = ?').run(id, userId);
     res.json({ success: true, id });
   } catch (err) {
     console.error(err);
@@ -505,25 +623,30 @@ app.delete('/api/workspaces/:id', requireAuth, (req, res) => {
   }
 });
 
-// PATCH: Toggle favorite status
+// PATCH: Toggle favorite status (Fix BOLA: scoped strictly to user_id)
 app.patch('/api/products/:id/favorite', requireAuth, (req, res) => {
   if (!ENABLE_DB_CACHE) return res.status(501).json({ error: 'DB not enabled' });
   try {
     const { id } = req.params;
-    const { is_favorite } = req.body;
+    const { is_favorite, workspace_id } = req.body;
     const userId = req.user.id;
 
-    // Verify ownership
-    const product = db.prepare(`
-        SELECT p.id FROM products p
-        JOIN workspaces w ON p.workspace_id = w.id
-        WHERE p.id = ? AND w.user_id = ?
-    `).get(id, userId);
+    let result;
+    if (workspace_id && workspace_id !== 'all') {
+      result = db.prepare(`
+        UPDATE products SET is_favorite = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND workspace_id = ? AND user_id = ?
+      `).run(is_favorite ? 1 : 0, id, workspace_id, userId);
+    } else {
+      result = db.prepare(`
+        UPDATE products SET is_favorite = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND user_id = ?
+      `).run(is_favorite ? 1 : 0, id, userId);
+    }
 
-    if (!product) return res.status(404).json({ error: 'Product not found' });
-
-    db.prepare('UPDATE products SET is_favorite = ? WHERE id = ?')
-      .run(is_favorite ? 1 : 0, id);
+    if (result.changes === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
 
     res.json({ success: true, id, is_favorite });
   } catch (err) {
@@ -680,6 +803,7 @@ app.post('/api/scrape', requireAuth, async (req, res) => {
       const productData = {
         id,
         workspace_id: workspaceId,
+        user_id: userId,
         url,
         title: title.trim(),
         image,
@@ -694,8 +818,8 @@ app.post('/api/scrape', requireAuth, async (req, res) => {
       if (ENABLE_DB_CACHE) {
         try {
           db.prepare(`
-                INSERT OR REPLACE INTO products (id, workspace_id, url, title, image, price, size, is_favorite)
-                VALUES (@id, @workspace_id, @url, @title, @image, @price, @size, @is_favorite)
+                INSERT OR REPLACE INTO products (id, workspace_id, user_id, url, title, image, price, size, is_favorite)
+                VALUES (@id, @workspace_id, @user_id, @url, @title, @image, @price, @size, @is_favorite)
             `).run(productData);
         } catch (dbErr) {
           console.error('DB Write Error:', dbErr);
@@ -718,6 +842,65 @@ app.post('/api/scrape', requireAuth, async (req, res) => {
 
   res.json(results);
 });
+
+// Lightweight Streaming Image Proxy (Frugal zero-disk fallback for anti-hotlinking stores)
+app.get('/api/proxy-image', async (req, res) => {
+  const { url } = req.query;
+  if (!url || typeof url !== 'string') {
+    return res.status(400).send('Missing url parameter');
+  }
+
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return res.status(400).send('Invalid protocol');
+    }
+    const hostname = parsed.hostname.toLowerCase();
+    if (
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      hostname === '169.254.169.254' ||
+      hostname.startsWith('10.') ||
+      hostname.startsWith('192.168.') ||
+      hostname.endsWith('.internal') ||
+      hostname.endsWith('.local')
+    ) {
+      return res.status(403).send('Restricted destination');
+    }
+
+    const imageStream = await axios({
+      method: 'GET',
+      url,
+      responseType: 'stream',
+      timeout: 8000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+        'Referer': `${parsed.protocol}//${parsed.hostname}/`
+      },
+      maxContentLength: 8 * 1024 * 1024 // 8MB memory protection
+    });
+
+    const contentType = imageStream.headers['content-type'];
+    if (contentType) res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'public, max-age=604800, immutable'); // Cache 7 days in client
+    imageStream.data.pipe(res);
+  } catch (err) {
+    res.status(502).send('Failed to fetch image');
+  }
+});
+
+// Serve static frontend assets in production if built
+const clientDistPath = path.resolve(__dirname, '../client/dist');
+if (fs.existsSync(clientDistPath)) {
+  app.use(express.static(clientDistPath));
+  app.use((req, res, next) => {
+    if (req.method === 'GET' && !req.path.startsWith('/api')) {
+      return res.sendFile(path.join(clientDistPath, 'index.html'));
+    }
+    next();
+  });
+}
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);

@@ -12,8 +12,11 @@
     "dev:server": "cd server && npm run dev",
     "dev:client": "cd client && npm run dev",
     "dev:ngrok": "node scripts/start-ngrok.js",
-    "start": "npm run dev",
     "build": "cd client && npm run build",
+    "start": "node server/index.js",
+    "start:prod": "npm run build && node server/index.js",
+    "test": "cd server && npm test",
+    "deploy:check": "node scripts/deploy-preflight.js",
     "outreach": "node scripts/outreach-generator.js && open outreach/index.html"
   },
   "repository": {

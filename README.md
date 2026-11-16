@@ -136,6 +136,31 @@ Open [http://localhost:5173](http://localhost:5173). Initial default credentials
 
 ---
 
+## 🚀 100% Free Deployment Options
+
+ShopDeck can be deployed with zero ongoing hosting fees:
+
+### Option A: Netlify + Render (Fastest Split Stack)
+1. **Deploy Backend to Render**:
+   - Create a free account at [Render.com](https://render.com).
+   - Create a new **Web Service**, select this repo. Render uses [render.yaml](file:///Users/gaurav/Development/antigravity/local-shop/render.yaml) automatically (`npm run setup && npm run build` -> `npm start`).
+   - Copy your Render backend URL (e.g. `https://shopdeck-api.onrender.com`).
+2. **Deploy Frontend to Netlify**:
+   - Create a free account at [Netlify](https://www.netlify.com).
+   - Click **Add new site** -> **Import an existing project** -> Select your GitHub repository. Netlify uses [netlify.toml](file:///Users/gaurav/Development/antigravity/local-shop/netlify.toml).
+   - In Netlify Site Settings -> Environment Variables, set:
+     - `VITE_API_URL` = `https://your-render-url.onrender.com`
+   - Click **Deploy Site**.
+
+### Option B: Oracle Cloud Always Free VM (High Performance All-in-One)
+- Deploy the self-contained multi-stage [Dockerfile](file:///Users/gaurav/Development/antigravity/local-shop/Dockerfile) to an Oracle Cloud Always Free VM (4 ARM cores, 24 GB RAM, 200 GB persistent storage):
+  ```bash
+  docker build -t shopdeck:latest .
+  docker run -d --name shopdeck -p 80:3000 -v /var/data/shopdeck:/app/server/data shopdeck:latest
+  ```
+
+---
+
 ## 🛠️ Status, Roadmap & Feedback
 
 ShopDeck is an early **Proof of Concept**. It is currently designed to run locally on your machine for personal outfit and event curation.

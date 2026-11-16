@@ -20,7 +20,7 @@ const ConfirmDialog = ({ isOpen, onConfirm, onCancel, product }) => {
                     <div className="confirm-content">
                         <p>Are you sure you want to remove this product?</p>
                         <div className="product-preview">
-                            <img src={product.image} alt={product.title} />
+                            <img src={product.image} alt={product.title} referrerPolicy="no-referrer" />
                             <div className="product-info">
                                 <div className="product-title">{product.title}</div>
                                 <div className="product-price">{product.price}</div>

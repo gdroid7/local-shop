@@ -88,3 +88,4 @@ You now have a local outreach dashboard with one-click direct message launches:
    - **Indie Hacker Curators**: Creators who showcase lightweight problem-solving software.
 3. Click **"📋 Copy"** to copy the personalized pitch or **"🐦 Tweet / DM"** to launch Twitter/X directly with the pre-filled message!
 4. Click **"Pending"** to toggle to **"✓ Sent"** to track your daily outreach progress.
+

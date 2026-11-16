@@ -1,0 +1,10 @@
+[build]
+  base = "client"
+  command = "npm run build"
+  publish = "dist"
+
+# Single Page App routing fallback: redirects all non-file routes to index.html
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

@@ -79,6 +79,7 @@ const ProductCard = ({ product, onDelete, onToggleFavorite, isSwipeMode = false 
                         src={image}
                         alt={title}
                         loading="lazy"
+                        referrerPolicy="no-referrer"
                         onLoad={() => setImageLoaded(true)}
                         onError={() => setImageError(true)}
                         style={{
